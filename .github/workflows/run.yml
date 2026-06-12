@@ -1,4 +1,4 @@
-name: YouTube Video Downloader via Domain Patch
+name: YouTube Video Downloader Standard
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       youtube_url:
         description: 'YouTube Video URL'
         required: true
-        default: 'https://www.youtube.com/live/R36qfvXK3XQ'
+        default: 'https://youtu.be/NdVhKakgGHM'
       telegram_target:
         description: 'Telegram Channel/User ID'
         required: true
@@ -26,13 +26,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           pip install yt-dlp telethon requests Pillow webrtcvad
+          pip install --upgrade pip
           pip install --upgrade yt-dlp
 
       - name: Download Cookies
         run: |
           curl -sL "https://raw.githubusercontent.com/bijadex09/mshmsdin/main/cookies.txt" -o cookies.txt
 
-      - name: Download Video via Patched Cookies
+      - name: Download Video Standard
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           TG_TARGET: ${{ github.event.inputs.telegram_target }}
@@ -49,8 +50,7 @@ jobs:
           
           BASE_DIR = os.path.dirname(os.path.abspath(__file__))
           TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
-          ORIGINAL_COOKIES = os.path.join(BASE_DIR, "cookies.txt")
-          PATCHED_COOKIES = os.path.join(BASE_DIR, "cookies_patched.txt")
+          COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
           def tg_msg(text):
               try:
@@ -58,52 +58,16 @@ jobs:
                   requests.post(url, json={"chat_id": int(TG_TARGET), "text": text}, timeout=10)
               except: pass
 
-          # معالجة ملف الكوكيز لمطابقة النطاقات الصارمة ليوتيوب
-          def patch_cookies():
-              if not os.path.exists(ORIGINAL_COOKIES):
-                  return False
-              
-              with open(ORIGINAL_COOKIES, 'r', encoding='utf-8') as f:
-                  lines = f.readlines()
-              
-              patched_lines = []
-              for line in lines:
-                  patched_lines.append(line)
-                  # تكرار الكوكيز بدون النقطة الابتدائية ومع النطاق الفرعي www لتخطي الفحص الصارم
-                  if line.strip() and not line.startswith('#'):
-                      parts = line.split('\t')
-                      if len(parts) >= 7 and parts[0] == '.youtube.com':
-                          # إضافة نسخة لـ youtube.com
-                          parts_clean = parts.copy()
-                          parts_clean[0] = 'youtube.com'
-                          patched_lines.append('\t'.join(parts_clean))
-                          
-                          # إضافة نسخة لـ www.youtube.com
-                          parts_www = parts.copy()
-                          parts_www[0] = 'www.youtube.com'
-                          patched_lines.append('\t'.join(parts_www))
-
-              with open(PATCHED_COOKIES, 'w', encoding='utf-8') as f:
-                  f.writelines(patched_lines)
-              return True
-
           def download_video(url):
-              patch_cookies()
-              
+              # نفس الأمر القياسي من مشروعك الناجح تماماً بدون أي تعديلات إضافية
               command = [
-                  "yt-dlp", 
-                  "--cookies", PATCHED_COOKIES, 
-                  "--js-runtime", "node",
-                  "--remote-components", "ejs:github",
-                  "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                  "--extractor-args", "youtube:player-client=android,web;player_skip=web_embedded_player_bytecode",
-                  "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
-                  "--merge-output-format", "mp4", 
-                  "-o", TEMP_VIDEO, 
-                  url
+                  "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
+                  "--remote-components", "ejs:github", "-f", 
+                  "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+                  "--merge-output-format", "mp4", "-o", TEMP_VIDEO, url
               ]
               try:
-                  print(f"🚀 Running patched command: {' '.join(command)}")
+                  print(f"🚀 Running standard command: {' '.join(command)}")
                   result = subprocess.run(command, capture_output=True, text=True)
                   print(result.stdout)
                   if result.returncode != 0:
@@ -113,14 +77,14 @@ jobs:
                   print(f"❌ Subprocess execution failed: {e}")
                   return False
 
-          print("\n📥 Initiating secure video download via Domain-Patched Cookies...")
-          tg_msg("📥 جاري تصحيح النطاقات داخلياً والبدء في تحميل الفيديو...")
+          print("\n📥 Downloading video via standard working method...")
+          tg_msg("📥 جاري التحميل بالطريقة القياسية المعتمدة...")
 
           if download_video(YT_URL):
               size_mb = os.path.getsize(TEMP_VIDEO) / (1024 * 1024)
               print(f"✅ Download successful! File size: {size_mb:.2f} MB")
-              tg_msg(f"✅ تم إصلاح التوثيق وتحميل الفيديو بنجاح!\n📦 الحجم: {size_mb:.2f} ميجابايت.\n\nبانتظار توجيهاتك القادمة...")
+              tg_msg(f"✅ تم تحميل الفيديو بنجاح واكتمال حفظه!\n📦 الحجم: {size_mb:.2f} ميجابايت.\n\nبانتظار خطوتك التالية...")
           else:
-              print("❌ Patched download method failed!")
-              tg_msg("❌ فشل التحميل، نظام الحماية يرفض النطاق المعالج.")
+              print("❌ Standard download method failed!")
+              tg_msg("❌ فشل تحميل الفيديو.")
               sys.exit(1)
