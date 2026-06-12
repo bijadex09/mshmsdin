@@ -199,7 +199,8 @@ jobs:
           النص المراد تحليله:
           {transcript_data}"""
 
-              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_KEY}"
+              # استخدام المسار الرسمي والجيل الحديث والمستقر من نموذج الـ Flash
+              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
               headers = {"Content-Type": "application/json"}
               payload = {
                   "contents": [
