@@ -27,18 +27,16 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg nodejs npm
+          sudo apt-get install -y ffmpeg
           pip install yt-dlp telethon requests Pillow webrtcvad
 
-      - name: Create cookies.txt for yt-dlp
-        env:
-          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+      - name: Download cookies file
         run: |
-          if [ -n "$YT_COOKIES" ]; then
-            echo "$YT_COOKIES" > cookies.txt
-            echo "✅ Cookies file created"
+          curl -L -o cookies.txt "https://raw.githubusercontent.com/bijadex09/mshmsdin/main/cookies.txt"
+          if [ -f cookies.txt ] && [ -s cookies.txt ]; then
+            echo "✅ Cookies file downloaded ($(wc -l < cookies.txt) lines)"
           else
-            echo "⚠️ No cookies provided, will try without"
+            echo "⚠️ Failed to download cookies file or file is empty"
             echo "" > cookies.txt
           fi
 
@@ -84,22 +82,35 @@ jobs:
           print(f"🎯 Target: {TELEGRAM_TARGET}")
           print(f"📺 Video: {YOUTUBE_URL}")
           
+          # التحقق من ملف الكوكيز
+          if os.path.exists(COOKIES_FILE):
+              cookie_size = os.path.getsize(COOKIES_FILE)
+              print(f"📄 Cookies file size: {cookie_size} bytes")
+              with open(COOKIES_FILE, 'r') as f:
+                  first_line = f.readline().strip()
+              print(f"📄 First line: {first_line[:100]}")
+          else:
+              print("⚠️ No cookies file found!")
+          
           # ======================================================================
           # الدوال المساعدة
           # ======================================================================
           def run_command(cmd, error_message="Command failed", show_stderr=False):
               print(f"  🏃 {' '.join(cmd[:6])}...")
-              result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-              if result.returncode != 0:
-                  print(f"  ⚠️ {error_message}")
-                  if show_stderr and result.stderr:
-                      # تصفية التحذيرات غير المهمة
-                      lines = result.stderr.split('\n')
-                      important_lines = [l for l in lines if 'WARNING' not in l and 'warning' not in l]
-                      if important_lines:
-                          print(f"  {important_lines[-1][:200]}")
+              try:
+                  result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                  if result.returncode != 0:
+                      print(f"  ⚠️ {error_message}")
+                      if show_stderr and result.stderr:
+                          lines = result.stderr.split('\n')
+                          important_lines = [l for l in lines if 'WARNING' not in l and 'warning' not in l.lower()]
+                          if important_lines:
+                              print(f"  {important_lines[-1][:200]}")
+                      return False
+                  return True
+              except subprocess.TimeoutExpired:
+                  print(f"  ⚠️ Timeout: {error_message}")
                   return False
-              return True
           
           def time_to_seconds(time_str):
               if not time_str: return 0
@@ -129,7 +140,7 @@ jobs:
                       await client.disconnect()
                   asyncio.run(send())
               except Exception as e:
-                  print(f"  ⚠️ Could not send Telegram notification: {e}")
+                  print(f"  ⚠️ Could not send Telegram notification: {str(e)[:100]}")
           
           # ======================================================================
           # المرحلة 1: تحميل الترجمة
@@ -140,11 +151,10 @@ jobs:
           
           srt_downloaded = False
           
-          # خيارات yt-dlp المختلفة لتجاوز التحديات
+          # خيارات yt-dlp الأساسية
           ytdlp_base_options = [
               '--no-playlist',
               '--no-check-certificates',
-              '--prefer-insecure',
               '--geo-bypass',
               '--no-warnings',
               '--extractor-retries', '5',
@@ -154,20 +164,19 @@ jobs:
               '--max-sleep-interval', '5',
           ]
           
-          # المحاولة 1: ترجمة تلقائية مع cookies
-          if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
-              print("🔄 محاولة 1: ترجمة تلقائية مع cookies...")
-              cmd = [
-                  'yt-dlp',
-                  '--cookies', COOKIES_FILE,
-                  '--write-auto-subs',
-                  '--sub-langs', 'ar',
-                  '--convert-subs', 'srt',
-                  '--skip-download',
-                  '--output', '%(title)s',
-              ] + ytdlp_base_options + [YOUTUBE_URL]
-              
-              run_command(cmd, "Failed with cookies")
+          # تحميل الترجمة
+          print("🔄 تحميل الترجمة التلقائية العربية...")
+          cmd = [
+              'yt-dlp',
+              '--cookies', COOKIES_FILE,
+              '--write-auto-subs',
+              '--sub-langs', 'ar',
+              '--convert-subs', 'srt',
+              '--skip-download',
+              '--output', '%(title)s',
+          ] + ytdlp_base_options + [YOUTUBE_URL]
+          
+          run_command(cmd, "Auto subs download attempt finished")
           
           # البحث عن ملفات SRT
           for f in glob.glob('*.ar.srt') + glob.glob('*.srt'):
@@ -177,32 +186,12 @@ jobs:
                   print(f"✅ Found SRT: {f}")
                   break
           
-          # المحاولة 2: بدون cookies
+          # إذا لم نجد، جرب ترجمة يدوية
           if not srt_downloaded:
-              print("🔄 محاولة 2: ترجمة تلقائية بدون cookies...")
+              print("🔄 محاولة الترجمة اليدوية...")
               cmd = [
                   'yt-dlp',
-                  '--write-auto-subs',
-                  '--sub-langs', 'ar',
-                  '--convert-subs', 'srt',
-                  '--skip-download',
-                  '--output', '%(title)s',
-              ] + ytdlp_base_options + [YOUTUBE_URL]
-              
-              run_command(cmd, "Failed without cookies")
-              
-              for f in glob.glob('*.ar.srt') + glob.glob('*.srt'):
-                  if os.path.exists(f):
-                      os.rename(f, SRT_FILENAME)
-                      srt_downloaded = True
-                      print(f"✅ Found SRT: {f}")
-                      break
-          
-          # المحاولة 3: ترجمة يدوية
-          if not srt_downloaded:
-              print("🔄 محاولة 3: ترجمة يدوية...")
-              cmd = [
-                  'yt-dlp',
+                  '--cookies', COOKIES_FILE,
                   '--write-subs',
                   '--sub-langs', 'ar',
                   '--convert-subs', 'srt',
@@ -210,7 +199,7 @@ jobs:
                   '--output', '%(title)s',
               ] + ytdlp_base_options + [YOUTUBE_URL]
               
-              run_command(cmd, "Manual subs failed")
+              run_command(cmd, "Manual subs download attempt finished")
               
               for f in glob.glob('*.ar.srt') + glob.glob('*.srt'):
                   if os.path.exists(f):
@@ -219,33 +208,12 @@ jobs:
                       print(f"✅ Found SRT: {f}")
                       break
           
-          # المحاولة 4: استخدام yt-dlp مع user-agent مختلف
+          # محاولة أخيرة مع extractor args
           if not srt_downloaded:
-              print("🔄 محاولة 4: مع User-Agent مختلف...")
+              print("🔄 محاولة مع player_client=android...")
               cmd = [
                   'yt-dlp',
-                  '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                  '--write-auto-subs',
-                  '--sub-langs', 'ar',
-                  '--convert-subs', 'srt',
-                  '--skip-download',
-                  '--output', '%(title)s',
-              ] + ytdlp_base_options + [YOUTUBE_URL]
-              
-              run_command(cmd, "Failed with different UA")
-              
-              for f in glob.glob('*.ar.srt') + glob.glob('*.srt'):
-                  if os.path.exists(f):
-                      os.rename(f, SRT_FILENAME)
-                      srt_downloaded = True
-                      print(f"✅ Found SRT: {f}")
-                      break
-          
-          # المحاولة 5: استخدام yt-dlp مع extractor args
-          if not srt_downloaded:
-              print("🔄 محاولة 5: مع extractor arguments...")
-              cmd = [
-                  'yt-dlp',
+                  '--cookies', COOKIES_FILE,
                   '--extractor-args', 'youtube:player_client=android,web',
                   '--write-auto-subs',
                   '--sub-langs', 'ar',
@@ -254,7 +222,7 @@ jobs:
                   '--output', '%(title)s',
               ] + ytdlp_base_options + [YOUTUBE_URL]
               
-              run_command(cmd, "Failed with extractor args")
+              run_command(cmd, "Extractor args attempt finished")
               
               for f in glob.glob('*.ar.srt') + glob.glob('*.srt'):
                   if os.path.exists(f):
@@ -263,22 +231,16 @@ jobs:
                       print(f"✅ Found SRT: {f}")
                       break
           
-          # التحقق النهائي
           if not srt_downloaded:
-              print("\n❌ فشل تحميل الترجمة بعد كل المحاولات!")
-              print("📝 الأسباب المحتملة:")
-              print("   1. الفيديو لا يحتوي على ترجمة عربية")
-              print("   2. الكوكيز منتهية الصلاحية")
-              print("   3. يوتيوب يطلب تحقق إضافي")
-              
+              print("\n❌ فشل تحميل الترجمة!")
               error_msg = (
                   "❌ **فشل تحميل الترجمة**\n\n"
-                  f"🔗 [الفيديو]({YOUTUBE_URL})\n"
-                  "⚠️ لم يتم العثور على ترجمة عربية\n\n"
-                  "📝 **الحلول المقترحة:**\n"
-                  "• تأكد من أن الفيديو يحتوي على ترجمة عربية\n"
-                  "• قم بتحديث ملف الكوكيز\n"
-                  "• جرب فيديو آخر"
+                  + "🔗 [الفيديو](" + YOUTUBE_URL + ")\n"
+                  + "⚠️ لم يتم العثور على ترجمة عربية\n\n"
+                  + "📝 **الحلول:**\n"
+                  + "• تأكد من وجود ترجمة عربية للفيديو\n"
+                  + "• قم بتحديث ملف الكوكيز\n"
+                  + "• جرب فيديو آخر"
               )
               send_telegram_message(error_msg)
               sys.exit(1)
@@ -287,7 +249,8 @@ jobs:
           with open(SRT_FILENAME, 'r', encoding='utf-8') as f:
               srt_content = f.read()
           
-          print(f"✅ تم تحميل الترجمة ({len(srt_content)} حرف)")
+          srt_len = len(srt_content)
+          print(f"✅ تم تحميل الترجمة ({srt_len} حرف)")
           
           # ======================================================================
           # المرحلة 2: تحليل مع Gemini
@@ -357,30 +320,41 @@ jobs:
               
               if response.status_code != 200:
                   print(f"❌ Gemini API Error: {response.status_code}")
-                  send_telegram_message(f"❌ فشل تحليل الترجمة\nخطأ: {response.status_code}")
+                  error_msg = "❌ فشل تحليل الترجمة - خطأ في Gemini API: " + str(response.status_code)
+                  send_telegram_message(error_msg)
                   sys.exit(1)
               
               result = response.json()
               timestamps_text = result['candidates'][0]['content']['parts'][0]['text']
               
           except Exception as e:
-              print(f"❌ Gemini error: {e}")
-              send_telegram_message(f"❌ فشل تحليل الترجمة\n{e}")
+              error_str = str(e)
+              print(f"❌ Gemini error: {error_str[:200]}")
+              error_msg = "❌ فشل تحليل الترجمة: " + error_str[:200]
+              send_telegram_message(error_msg)
               sys.exit(1)
           
-          # حفظ وتحليل المواقيت
+          # حفظ المواقيت
           with open(TIMESTAMPS_FILENAME, 'w', encoding='utf-8') as f:
               f.write(timestamps_text)
           
+          print("✅ تم استخراج المواقيت:")
+          print(timestamps_text[:500])
+          
+          # تحليل المواقيت
           timestamp_pattern = r'•\s*([\d:]+)\s*\|\s*([\d:]+)\s*\|\s*(.*)'
           matches = re.findall(timestamp_pattern, timestamps_text)
           
           if not matches:
-              print("❌ لا توجد مواقيت صالحة!")
-              send_telegram_message(f"❌ فشل استخراج المواقيت\n{n timestamps_text[:300]}")
+              print("\n❌ لا توجد مواقيت صالحة!")
+              preview = timestamps_text[:300]
+              print("النص المستخرج: " + preview)
+              error_msg = "❌ فشل استخراج المواقيت\nالنص المستخرج:\n" + preview
+              send_telegram_message(error_msg)
               sys.exit(1)
           
-          print(f"✅ تم استخراج {len(matches)} مقطع")
+          matches_count = len(matches)
+          print(f"\n✅ تم استخراج {matches_count} مقطع بنجاح!")
           
           # ======================================================================
           # المرحلة 3: تحميل الفيديو
@@ -389,42 +363,31 @@ jobs:
           print("📥 المرحلة 3: تحميل الفيديو")
           print("="*60)
           
-          send_telegram_message(f"✅ تم تحليل {len(matches)} مقطع\n📥 جاري تحميل الفيديو...")
+          start_msg = "✅ تم تحليل " + str(matches_count) + " مقطع\n📥 جاري تحميل الفيديو..."
+          send_telegram_message(start_msg)
           
-          # تحميل الفيديو مع تجاوز التحديات
           video_downloaded = False
           
-          # محاولة 1: مع cookies
-          if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
-              print("🔄 تحميل مع cookies...")
+          print("🔄 تحميل الفيديو...")
+          cmd = [
+              'yt-dlp',
+              '--cookies', COOKIES_FILE,
+              '--live-from-start',
+              '--output', VIDEO_FILENAME,
+          ] + ytdlp_base_options + [YOUTUBE_URL]
+          
+          video_downloaded = run_command(cmd, "Video download failed", show_stderr=True)
+          
+          if not video_downloaded:
+              print("🔄 محاولة مع player_client=android...")
               cmd = [
                   'yt-dlp',
                   '--cookies', COOKIES_FILE,
-                  '--live-from-start',
-                  '--output', VIDEO_FILENAME,
-              ] + ytdlp_base_options + [YOUTUBE_URL]
-              video_downloaded = run_command(cmd, "Download with cookies failed")
-          
-          # محاولة 2: بدون cookies
-          if not video_downloaded:
-              print("🔄 تحميل بدون cookies...")
-              cmd = [
-                  'yt-dlp',
-                  '--live-from-start',
-                  '--output', VIDEO_FILENAME,
-              ] + ytdlp_base_options + [YOUTUBE_URL]
-              video_downloaded = run_command(cmd, "Download without cookies failed")
-          
-          # محاولة 3: مع extractor args
-          if not video_downloaded:
-              print("🔄 تحميل مع extractor args...")
-              cmd = [
-                  'yt-dlp',
                   '--extractor-args', 'youtube:player_client=android',
                   '--live-from-start',
                   '--output', VIDEO_FILENAME,
               ] + ytdlp_base_options + [YOUTUBE_URL]
-              video_downloaded = run_command(cmd, "Download with extractor args failed")
+              video_downloaded = run_command(cmd, "Retry failed", show_stderr=True)
           
           if not video_downloaded or not os.path.exists(VIDEO_FILENAME):
               print("❌ فشل تحميل الفيديو!")
@@ -435,7 +398,7 @@ jobs:
           print(f"✅ تم تحميل الفيديو ({video_size:.1f} MB)")
           
           # ======================================================================
-          # باقي الدوال والمعالجة (نفس الكود السابق)
+          # دوال المعالجة
           # ======================================================================
           def create_thumbnail(title, output_path):
               width, height = 1080, 1920
@@ -525,7 +488,7 @@ jobs:
               return ok
           
           def compress_video(inp, out, ts=45):
-              return run_command(['ffmpeg', '-y', '-i', inp, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '35', '-c:a', 'aac', '-b:a', '48k', '-fs', f'{ts}M', '-loglevel', 'error', out])
+              return run_command(['ffmpeg', '-y', '-i', inp, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '35', '-c:a', 'aac', '-b:a', '48k', '-fs', str(ts)+'M', '-loglevel', 'error', out])
           
           # ======================================================================
           # معالجة وإرسال المقاطع
@@ -540,37 +503,39 @@ jobs:
               try: target = int(TELEGRAM_TARGET)
               except: target = TELEGRAM_TARGET
               
-              await client.send_message(target, f"🎬 بدء معالجة {len(matches)} مقطع...")
+              total = len(matches)
+              await client.send_message(target, "🎬 بدء معالجة " + str(total) + " مقطع...")
               
               sent, failed = 0, 0
               for idx, (ss, es, title) in enumerate(matches):
                   ssec, esec = time_to_seconds(ss), time_to_seconds(es)
                   if esec <= ssec: continue
                   dm = (esec-ssec)/60
-                  print(f"\n📹 {idx+1}/{len(matches)}: {title} ({dm:.1f}m)")
+                  print(f"\n📹 {idx+1}/{total}: {title} ({dm:.1f}m)")
                   
                   ct = tempfile.mkdtemp(dir=TEMP_DIR)
                   try:
-                      cp = os.path.join(ct, f"c.mp4")
+                      cp = os.path.join(ct, "c.mp4")
                       if not cut_clip(ss, es, cp): failed += 1; continue
                       
-                      ip = os.path.join(ct, f"t.png")
+                      ip = os.path.join(ct, "t.png")
                       mp = cp
                       if create_thumbnail(title, ip):
-                          mp2 = os.path.join(ct, f"m.mp4")
+                          mp2 = os.path.join(ct, "m.mp4")
                           if merge_with_image(cp, ip, mp2): mp = mp2
                       
-                      fp = os.path.join(ct, f"f.mp4")
+                      fp = os.path.join(ct, "f.mp4")
                       if not remove_silence(mp, fp): fp = mp
                       
-                      cap = f"**{title}**\n📌 {idx+1}/{len(matches)}\n⏱️ {ss}→{es} ({dm:.1f}m)"
+                      cap = "**" + title + "**\n📌 " + str(idx+1) + "/" + str(total) + "\n⏱️ " + ss + "→" + es + " (" + f"{dm:.1f}" + "m)"
                       try:
                           await client.send_file(target, fp, caption=cap, supports_streaming=True)
                           sent += 1
                           print("✅ Sent!")
                       except Exception as e:
-                          if "too big" in str(e).lower():
-                              comp = os.path.join(ct, f"comp.mp4")
+                          err_str = str(e)
+                          if "too big" in err_str.lower():
+                              comp = os.path.join(ct, "comp.mp4")
                               if compress_video(fp, comp):
                                   try:
                                       await client.send_file(target, comp, caption=cap+"\n(مضغوط)", supports_streaming=True)
@@ -580,12 +545,14 @@ jobs:
                           else: failed += 1
                       
                       if (idx+1)%5 == 0:
-                          await client.send_message(target, f"📊 {idx+1}/{len(matches)} | ✅{sent} ❌{failed}")
+                          progress = "📊 " + str(idx+1) + "/" + str(total) + " | ✅" + str(sent) + " ❌" + str(failed)
+                          await client.send_message(target, progress)
                   finally:
                       shutil.rmtree(ct, ignore_errors=True)
                   await asyncio.sleep(2)
               
-              await client.send_message(target, f"✅ تم!\n📊 {len(matches)} مقطع\n✅{sent} ❌{failed}")
+              final_msg = "✅ تم!\n📊 " + str(total) + " مقطع\n✅" + str(sent) + " ❌" + str(failed)
+              await client.send_message(target, final_msg)
               await client.disconnect()
           
           asyncio.run(process_and_send())
