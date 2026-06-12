@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          pip install yt-dlp telethon requests Pillow webrtcvad youtube-transcript-api
+          pip install yt-dlp telethon requests Pillow webrtcvad webvtt-py
           pip install --upgrade yt-dlp
 
       - name: Download Cookies
@@ -42,7 +42,7 @@ jobs:
           import yt_dlp
           import webrtcvad
           import wave
-          from youtube_transcript_api import YouTubeTranscriptApi
+          import webvtt
 
           API_ID = 24629594
           API_HASH = "a79fa760e65af09a85eb2cc97cb2263c"
@@ -52,14 +52,8 @@ jobs:
           TG_TARGET = os.environ['TG_TARGET']
           VIDEO = 'video.mp4'
           COOKIES = 'cookies.txt'
+          SUBS = 'sub_file.ar.vtt'
           TMP = tempfile.mkdtemp()
-
-          def vid_id(u):
-              patterns = [r"youtu\.be/([^&?/]+)", r"youtube\.com/watch\?v=([^&?/]+)", r"youtube\.com/embed/([^&?/]+)", r"youtube\.com/live/([^&?/]+)"]
-              for pattern in patterns:
-                  match = re.search(pattern, u)
-                  if match: return match.group(1)
-              return None
 
           def t2s(t):
               p = list(map(int, t.strip().split(':')))
@@ -152,34 +146,54 @@ jobs:
               return os.path.isfile(out)
 
           async def run_pipeline():
-              print("\n📥 Getting transcript via Transcript API...")
-              vid = vid_id(YT_URL)
-              print(f"Video ID: {vid}")
-
-              lines = []
+              print("\n📥 Downloading Subtitles via yt-dlp...")
+              # استخدام الطريقة المجرّبة والناجحة لاستخراج ملف الترجمة بدقة
+              sub_opts = {
+                  'skip_download': True,
+                  'writeautomaticsub': True,
+                  'subtitleslangs': ['ar'],
+                  'outtmpl': 'sub_file',
+                  'cookiefile': COOKIES if os.path.exists(COOKIES) else None,
+                  'quiet': True
+              }
               try:
-                  # تصحيح الاستدعاء المباشر للدالة دون استخدام دوت نيم تابعة للكائن الفاشل
-                  ts = YouTubeTranscriptApi.get_transcript(vid, languages=['ar', 'en'])
-                  for snippet in ts:
-                      seconds = snippet['start']
-                      h = int(seconds // 3600)
-                      m = int((seconds % 3600) // 60)
-                      s = int(seconds % 60)
-                      t_str = f"{h:02d}:{m:02d}:{s:02d}"
-                      txt = snippet['text'].replace('\n', ' ').strip()
-                      if txt:
-                          lines.append(f"{t_str} | {txt}")
+                  with yt_dlp.YoutubeDL(sub_opts) as ydl:
+                      ydl.download([YT_URL])
               except Exception as e:
-                  print(f"❌ API Method failed: {e}")
+                  print(f"Subtitles download error: {e}")
 
-              transcript = '\n'.join(lines)
-              
-              if not transcript.strip():
-                  print("❌ No transcript found using API Method!")
-                  await tg_msg("❌ لم يتم العثور على ترجمة للفيديو (تأكد من انتهاء البث ومعالجة يوتيوب للترجمة التلقائية)")
+              if not os.path.isfile(SUBS):
+                  print("❌ Subtitle file not found!")
+                  await tg_msg("❌ فشل استخراج ملف الترجمة من الفيديو")
                   sys.exit(1)
 
-              print(f"✅ Got {len(lines)} lines of transcript")
+              # قراءة وتحليل ملف الـ VTT
+              lines = []
+              try:
+                  for caption in webvtt.read(SUBS):
+                      t_start = caption.start.split('.')[0]
+                      clean_txt = " ".join([ln.strip() for ln in caption.text.split('\n') if ln.strip()])
+                      clean_txt = re.sub(r'<[^>]*>', '', clean_txt)
+                      if clean_txt:
+                          lines.append(f"{t_start} | {clean_txt}")
+              except Exception as e:
+                  print(f"VTT Parsing Error: {e}")
+                  sys.exit(1)
+
+              final_lines = []
+              last_line = ""
+              for ln in lines:
+                  if ln != last_line:
+                      final_lines.append(ln)
+                      last_line = ln
+
+              transcript = '\n'.join(final_lines)
+              print(f"✅ Got {len(final_lines)} lines of transcript")
+
+              if not transcript.strip():
+                  print("❌ Transcript is empty!")
+                  await tg_msg("❌ نص الترجمة فارغ أو لم ينجح تنظيفه")
+                  sys.exit(1)
 
               # ============== STEP 2: Gemini Analysis ==============
               print("\n🤖 Analyzing with Gemini...")
@@ -211,14 +225,14 @@ jobs:
               print("\n📥 Downloading video...")
               await tg_msg(f"✅ تم تحليل {len(segments)} مقطع\n📥 جاري تحميل الفيديو...")
 
-              opts = {'format': 'best[height<=720]', 'outtmpl': VIDEO, 'quiet': True,
-                      'cookiefile': COOKIES if os.path.exists(COOKIES) else None, 'live_from_start': True}
+              v_opts = {'format': 'best[height<=720]', 'outtmpl': VIDEO, 'quiet': True,
+                        'cookiefile': COOKIES if os.path.exists(COOKIES) else None, 'live_from_start': True}
               try:
-                  with yt_dlp.YoutubeDL(opts) as ydl:
+                  with yt_dlp.YoutubeDL(v_opts) as ydl:
                       ydl.download([YT_URL])
               except:
-                  opts['cookiefile'] = None
-                  with yt_dlp.YoutubeDL(opts) as ydl:
+                  v_opts['cookiefile'] = None
+                  with yt_dlp.YoutubeDL(v_opts) as ydl:
                       ydl.download([YT_URL])
 
               if not os.path.isfile(VIDEO):
@@ -245,7 +259,6 @@ jobs:
                   
                   ss_str, es_str = ts, s2t(end_sec)
                   dur_min = (end_sec - start_sec) / 60
-                  
                   print(f"\n📹 {idx+1}/{len(segments)}: {title[:60]} ({dur_min:.1f}m)")
                   
                   td = tempfile.mkdtemp(dir=TMP)
@@ -298,7 +311,8 @@ jobs:
 
           asyncio.run(run_pipeline())
 
-          if os.path.exists(VIDEO): os.remove(VIDEO)
-          if os.path.exists(COOKIES): os.remove(COOKIES)
+          # تنظيف الملفات
+          for f in [VIDEO, SUBS, COOKIES]:
+              if os.path.isfile(f): os.remove(f)
           shutil.rmtree(TMP, ignore_errors=True)
           print("\n✅ All done!")
