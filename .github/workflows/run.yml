@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg fontconfig build-essential python3-dev
-          pip install yt-dlp telethon requests Pillow webrtcvad-wheels
+          pip install yt-dlp requests Pillow webrtcvad-wheels
           pip install --upgrade pip
           pip install --upgrade yt-dlp
 
@@ -44,19 +44,14 @@ jobs:
           import sys
           import wave
           import shutil
-          import asyncio
           import tempfile
           import subprocess
           import requests
           import json
           import urllib.request
           from PIL import Image, ImageDraw, ImageFont
-          from telethon import TelegramClient
-          from telethon.sessions import StringSession
 
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
-          API_ID = 26585141
-          API_HASH = "80f12da304a444f6f168cd155c56d787"
           
           YT_URL = os.environ['YT_URL']
           TG_TARGET = os.environ['TG_TARGET']
@@ -91,15 +86,21 @@ jobs:
                   requests.post(url, json={"chat_id": int(TG_TARGET), "text": text}, timeout=15)
               except: pass
 
-          async def tg_send_video_telethon(filepath, caption):
+          def tg_send_video(filepath, caption):
               try:
-                  # استخدام StringSession فارغ مع توكن البوت مباشرة
-                  async with TelegramClient(StringSession(), API_ID, API_HASH) as client:
-                      await client.start(bot_token=BOT_TOKEN)
-                      await client.send_file(int(TG_TARGET), filepath, caption=caption, supports_streaming=True)
-                      return True
+                  url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
+                  with open(filepath, 'rb') as video:
+                      files = {'video': video}
+                      data = {'chat_id': int(TG_TARGET), 'caption': caption, 'supports_streaming': True}
+                      response = requests.post(url, data=data, files=files, timeout=120)
+                      if response.status_code == 200:
+                          print(f"✅ Video sent successfully: {filepath}")
+                          return True
+                      else:
+                          print(f"❌ Failed to send video: {response.text}")
+                          return False
               except Exception as e:
-                  print(f"⚠️ Telethon Upload error: {e}")
+                  print(f"⚠️ Send video error: {e}")
                   return False
 
           try:
@@ -389,7 +390,7 @@ jobs:
               
               if subprocess.run(merge_cmd).returncode == 0 and os.path.exists(reel_output):
                   caption_text = f"🎥 {clip['title']}\n\n⏱ التوقيت من الفيديو الأصلي: {clip['start']} 👈 {clip['end']}"
-                  asyncio.run(tg_send_video_telethon(reel_output, caption_text))
+                  tg_send_video(reel_output, caption_text)
               
               for temp_file in [raw_clip, vad_clip, final_img, reel_output]:
                   if os.path.exists(temp_file): os.remove(temp_file)
