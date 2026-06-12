@@ -1,4 +1,4 @@
-name: YouTube Video Downloader Standard
+name: YouTube Video Downloader via Secret Cookies
 
 on:
   workflow_dispatch:
@@ -29,14 +29,11 @@ jobs:
           pip install --upgrade pip
           pip install --upgrade yt-dlp
 
-      - name: Download Cookies
-        run: |
-          curl -sL "https://raw.githubusercontent.com/bijadex09/mshmsdin/main/cookies.txt" -o cookies.txt
-
       - name: Download Video Standard
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           TG_TARGET: ${{ github.event.inputs.telegram_target }}
+          COOKIES_TEXT: ${{ secrets.COOKIES_TEXT }}
         shell: python
         run: |
           import os
@@ -47,6 +44,7 @@ jobs:
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
           YT_URL = os.environ['YT_URL']
           TG_TARGET = os.environ['TG_TARGET']
+          COOKIES_TEXT = os.environ.get('COOKIES_TEXT', '')
           
           BASE_DIR = os.path.dirname(os.path.abspath(__file__))
           TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
@@ -58,8 +56,16 @@ jobs:
                   requests.post(url, json={"chat_id": int(TG_TARGET), "text": text}, timeout=10)
               except: pass
 
+          # إنشاء ملف الكوكيز مؤقتاً من الـ Secret
+          if COOKIES_TEXT:
+              with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+                  f.write(COOKIES_TEXT)
+          else:
+              print("❌ COOKIES_TEXT secret is missing!")
+              tg_msg("❌ خطأ: لم يتم العثور على السيكرت COOKIES_TEXT")
+              sys.exit(1)
+
           def download_video(url):
-              # نفس الأمر القياسي من مشروعك الناجح تماماً بدون أي تعديلات إضافية
               command = [
                   "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
                   "--remote-components", "ejs:github", "-f", 
@@ -67,7 +73,7 @@ jobs:
                   "--merge-output-format", "mp4", "-o", TEMP_VIDEO, url
               ]
               try:
-                  print(f"🚀 Running standard command: {' '.join(command)}")
+                  print(f"🚀 Running command via secret cookies: {' '.join(command)}")
                   result = subprocess.run(command, capture_output=True, text=True)
                   print(result.stdout)
                   if result.returncode != 0:
@@ -77,14 +83,20 @@ jobs:
                   print(f"❌ Subprocess execution failed: {e}")
                   return False
 
-          print("\n📥 Downloading video via standard working method...")
-          tg_msg("📥 جاري التحميل بالطريقة القياسية المعتمدة...")
+          print("\n📥 Downloading video via secure secret cookies...")
+          tg_msg("📥 جاري التحميل باستخدام الكوكيز المؤمن في الـ Secrets...")
 
-          if download_video(YT_URL):
+          success = download_video(YT_URL)
+
+          # حذف ملف الكوكيز فوراً بعد انتهاء المحاولة للأمان
+          if os.path.exists(COOKIES_FILE): 
+              os.remove(COOKIES_FILE)
+
+          if success:
               size_mb = os.path.getsize(TEMP_VIDEO) / (1024 * 1024)
               print(f"✅ Download successful! File size: {size_mb:.2f} MB")
-              tg_msg(f"✅ تم تحميل الفيديو بنجاح واكتمال حفظه!\n📦 الحجم: {size_mb:.2f} ميجابايت.\n\nبانتظار خطوتك التالية...")
+              tg_msg(f"✅ تم تحميل الفيديو بنجاح واكتمال حفظه المباشر!\n📦 الحجم: {size_mb:.2f} ميجابايت.\n\nبانتظار خطوتك التالية...")
           else:
-              print("❌ Standard download method failed!")
-              tg_msg("❌ فشل تحميل الفيديو.")
+              print("❌ Download method failed!")
+              tg_msg("❌ فشل تحميل الفيديو بالرغم من تحديث الكوكيز كـ Secret.")
               sys.exit(1)
