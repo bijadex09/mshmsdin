@@ -50,8 +50,7 @@ jobs:
           import requests
           import json
           import urllib.request
-          import threading
-          import time
+          import re
           from typing import List, Tuple
 
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
@@ -91,6 +90,10 @@ jobs:
           VIDEO_CRF = 20
           SILENCE_THRESHOLD = 0.5
           VAD_AGGRESSIVENESS = 3
+          
+          # إعدادات التوسيع
+          START_OFFSET = -3  # ناقص 3 ثواني (نزيد البداية)
+          END_OFFSET = 4     # زائد 4 ثواني (نزيد النهاية)
 
           def tg_msg(text):
               try:
@@ -143,7 +146,33 @@ jobs:
                   return f"{hours:02d}:{minutes:02d}:{secs:02d}"
               return f"{minutes:02d}:{secs:02d}"
 
-          # دالة قص المقطع المعدلة (ضع -i قبل -ss)
+          def time_to_seconds(time_str: str) -> float:
+              """تحويل تنسيق الوقت إلى ثواني"""
+              parts = time_str.strip().split(':')
+              if len(parts) == 2:  # MM:SS
+                  minutes, seconds = map(int, parts)
+                  return minutes * 60 + seconds
+              elif len(parts) == 3:  # HH:MM:SS
+                  hours, minutes, seconds = map(int, parts)
+                  return hours * 3600 + minutes * 60 + seconds
+              return 0.0
+
+          def adjust_timestamp(start_time: str, end_time: str, video_duration: float) -> Tuple[str, str]:
+              """توسيع المقطع بإضافة START_OFFSET للبداية و END_OFFSET للنهاية"""
+              start_sec = time_to_seconds(start_time) + START_OFFSET
+              end_sec = time_to_seconds(end_time) + END_OFFSET
+              
+              # التأكد من عدم تجاوز حدود الفيديو
+              start_sec = max(0, start_sec)
+              end_sec = min(video_duration, end_sec)
+              
+              # التأكد من أن النهاية بعد البداية
+              if end_sec <= start_sec:
+                  end_sec = start_sec + 1
+              
+              return seconds_to_time(start_sec), seconds_to_time(end_sec)
+
+          # دالة قص المقطع
           def extract_clip(video_path: str, start: str, end: str, output_path: str) -> bool:
               return run_cmd([
                   'ffmpeg', '-y',
@@ -440,6 +469,10 @@ jobs:
               tg_msg("❌ فشل تحميل الفيديو.")
               sys.exit(1)
 
+          # الحصول على مدة الفيديو الأصلي
+          video_duration = get_duration(TEMP_VIDEO)
+          print(f"📹 Video duration: {seconds_to_time(video_duration)}")
+
           print("\n📜 Extracting transcript...")
           srt_command = [
               "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
@@ -573,14 +606,29 @@ jobs:
               tg_msg(f"❌ حدث خطأ أثناء إرسال الطلب: {e}")
               sys.exit(1)
 
-          # استخراج المواقيت
+          # استخراج المواقيت من رد جيميناي
           clips = []
           for line in gemini_result.strip().split('\n'):
               if '|' in line:
                   line = line.lstrip('• ').strip()
                   parts = line.split('|')
                   if len(parts) >= 3:
-                      clips.append({'start': parts[0].strip(), 'end': parts[1].strip(), 'title': parts[2].strip()})
+                      original_start = parts[0].strip()
+                      original_end = parts[1].strip()
+                      title = parts[2].strip()
+                      
+                      # تطبيق التعديلات على الوقت
+                      new_start, new_end = adjust_timestamp(original_start, original_end, video_duration)
+                      
+                      clips.append({
+                          'start': new_start, 
+                          'end': new_end, 
+                          'title': title,
+                          'original_start': original_start,
+                          'original_end': original_end
+                      })
+                      
+                      print(f"  📍 Clip {len(clips)}: {original_start} → {original_end}  =>  {new_start} → {new_end} (+{abs(START_OFFSET)}s / +{END_OFFSET}s)")
 
           if not clips:
               tg_msg("⚠️ لم يتم العثور على مواقيت مقاطع صالحة للقص.")
@@ -600,8 +648,8 @@ jobs:
               img_path = os.path.join(BASE_DIR, f"img_{idx}.png")
               output_path = os.path.join(BASE_DIR, f"{idx:02d}_{safe_name}.mp4")
               
-              # قص المقطع
-              print(f"  ✂️ Cutting: {clip['start']} → {clip['end']}")
+              # قص المقطع (باستخدام التوقيتات المعدلة)
+              print(f"  ✂️ Cutting: {clip['start']} → {clip['end']} (original: {clip['original_start']} → {clip['original_end']})")
               if not extract_clip(TEMP_VIDEO, clip['start'], clip['end'], raw_clip):
                   print(f"  ❌ Failed to cut clip")
                   continue
@@ -627,12 +675,13 @@ jobs:
                   size_mb = os.path.getsize(output_path) / (1024 * 1024)
                   print(f"  ✅ Merged successfully ({size_mb:.1f}MB)")
                   
-                  caption_text = f"🎥 {clip['title']}\n\n⏱ {clip['start']} 👈 {clip['end']}"
+                  # إرسال إلى تليجرام (مع عرض التوقيتات الأصلية والمعدلة)
+                  caption_text = f"🎥 {clip['title']}\n\n⏱ التوقيت الأصلي: {clip['original_start']} 👈 {clip['original_end']}\n📌 التوقيت المعدل: {clip['start']} 👈 {clip['end']}"
                   tg_send_video(output_path, caption_text)
               else:
                   print(f"  ❌ Failed to merge")
               
-              # تنظيف الملفات
+              # تنظيف الملفات المؤقتة
               for temp_file in [raw_clip, vad_clip, img_path, output_path]:
                   if os.path.exists(temp_file):
                       try:
