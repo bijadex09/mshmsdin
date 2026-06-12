@@ -68,7 +68,7 @@ jobs:
           EXPECTED_VTT = os.path.join(BASE_DIR, "sub_file.ar.vtt")
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
 
-          # إعدادات الصور والخطوط (مأخوذة من الكود الأصلي)
+          # إعدادات الصور والخطوط
           FONT_SYSTEM_DIR = os.path.expanduser("~/.local/share/fonts")
           IMAGES_CACHE_DIR = os.path.expanduser("~/.local/share/images")
           FONT_NAME = "ReadexPro-Bold.ttf"
@@ -85,7 +85,7 @@ jobs:
           CACHED_BG_SHORT = os.path.join(IMAGES_CACHE_DIR, "background1.png")
           CACHED_BG_LONG = os.path.join(IMAGES_CACHE_DIR, "background.png")
 
-          # إعدادات الصوت والفيديو (مأخوذة من الكود الأصلي)
+          # إعدادات الصوت والفيديو
           AUDIO_BITRATE = "96k"
           VIDEO_PRESET = "faster"
           VIDEO_CRF = 20
@@ -143,7 +143,20 @@ jobs:
                   return f"{hours:02d}:{minutes:02d}:{secs:02d}"
               return f"{minutes:02d}:{secs:02d}"
 
-          # دالة إزالة الصمت (مأخوذة بالكامل من الكود الأصلي)
+          # دالة قص المقطع المعدلة (ضع -i قبل -ss)
+          def extract_clip(video_path: str, start: str, end: str, output_path: str) -> bool:
+              return run_cmd([
+                  'ffmpeg', '-y',
+                  '-i', video_path,
+                  '-ss', start,
+                  '-to', end,
+                  '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', str(VIDEO_CRF),
+                  '-c:a', 'aac', '-b:a', AUDIO_BITRATE,
+                  '-loglevel', 'error',
+                  output_path
+              ])
+
+          # دالة إزالة الصمت
           def merge_segments(segments: List, threshold: float) -> List[Tuple[float, float]]:
               if not segments:
                   return []
@@ -248,19 +261,7 @@ jobs:
               
               return False, 0.0
 
-          # دالة قص المقطع (مأخوذة من الكود الأصلي)
-          def extract_clip(video_path: str, start: str, end: str, output_path: str) -> bool:
-              return run_cmd([
-                  'ffmpeg', '-y',
-                  '-ss', start,
-                  '-to', end,
-                  '-i', video_path,
-                  '-c', 'copy',
-                  '-loglevel', 'error',
-                  output_path
-              ])
-
-          # دوال إنشاء الصور (مأخوذة بالكامل من الكود الأصلي)
+          # دوال إنشاء الصور
           def get_single_line_font_size(word_count):
               if word_count <= 3:
                   return 90
@@ -296,7 +297,6 @@ jobs:
               else:
                   bg_to_use = bg_image
               
-              # استخدام SVG كما في الكود الأصلي
               if not use_multiline:
                   svg = f'''<?xml version="1.0" encoding="UTF-8"?>
           <svg width="1080" height="1920" xmlns="http://www.w3.org/2000/svg">
@@ -347,10 +347,8 @@ jobs:
                   f.write(svg)
               
               try:
-                  # محاولة استخدام sharp-cli كما في الكود الأصلي
                   subprocess.run(['sharp', 'composite', temp_svg, '--input', bg_to_use, '--output', output_path], check=True, capture_output=True)
               except:
-                  # fallback باستخدام ffmpeg كما في الكود الأصلي
                   temp_text_png = os.path.join(IMAGES_CACHE_DIR, "temp_text.png")
                   try:
                       subprocess.run(['sharp', '-i', temp_svg, '-o', temp_text_png, '--density', '300'], check=True, capture_output=True)
@@ -366,7 +364,7 @@ jobs:
               
               return os.path.exists(output_path)
 
-          # دالة دمج الفيديو مع الصورة (مأخوذة من الكود الأصلي)
+          # دالة دمج الفيديو مع الصورة
           def process_tiktok_reel(video_path, image_path, output_path):
               filter_complex = (
                   "[0:v]loop=loop=-1:size=1:start=0,setpts=PTS-STARTPTS,scale=trunc(iw/2)*2:trunc(ih/2)*2[bg]; "
@@ -575,7 +573,7 @@ jobs:
               tg_msg(f"❌ حدث خطأ أثناء إرسال الطلب: {e}")
               sys.exit(1)
 
-          # استخراج المواقيت من رد جيميناي
+          # استخراج المواقيت
           clips = []
           for line in gemini_result.strip().split('\n'):
               if '|' in line:
@@ -594,7 +592,6 @@ jobs:
           for idx, clip in enumerate(clips, 1):
               print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']}")
               
-              # إنشاء اسم آمن للملف
               safe_name = "".join(c for c in clip['title'] if c.isalnum() or c == ' ' or c in '_-')
               safe_name = safe_name.replace(' ', '_')[:100]
               
@@ -618,25 +615,24 @@ jobs:
               elif removed > 0:
                   print(f"  ✅ Removed {seconds_to_time(removed)} of silence")
               
-              # إنشاء الصورة باستخدام SVG (نفس الكود الأصلي)
+              # إنشاء الصورة
               print(f"  🖼️ Creating image...")
               if not create_image_with_title(clip['title'], img_path):
                   print(f"  ❌ Failed to create image")
                   continue
               
-              # دمج الفيديو مع الصورة (نفس الكود الأصلي)
+              # دمج الفيديو مع الصورة
               print(f"  🎬 Merging video with image...")
               if process_tiktok_reel(vad_clip, img_path, output_path) and os.path.exists(output_path):
                   size_mb = os.path.getsize(output_path) / (1024 * 1024)
                   print(f"  ✅ Merged successfully ({size_mb:.1f}MB)")
                   
-                  # إرسال إلى تليجرام
                   caption_text = f"🎥 {clip['title']}\n\n⏱ {clip['start']} 👈 {clip['end']}"
                   tg_send_video(output_path, caption_text)
               else:
                   print(f"  ❌ Failed to merge")
               
-              # تنظيف الملفات المؤقتة
+              # تنظيف الملفات
               for temp_file in [raw_clip, vad_clip, img_path, output_path]:
                   if os.path.exists(temp_file):
                       try:
