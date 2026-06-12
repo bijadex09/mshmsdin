@@ -16,7 +16,7 @@ jobs:
   process:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Node.js (For yt-dlp JavaScript challenge solver)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -25,7 +25,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          pip install yt-dlp telethon requests Pillow webrtcvad webvtt-py
+          pip install yt-dlp telethon requests Pillow webrtcvad youtube-transcript-api
           pip install --upgrade yt-dlp
 
       - name: Download Cookies
@@ -45,7 +45,7 @@ jobs:
           import yt_dlp
           import webrtcvad
           import wave
-          import webvtt
+          from youtube_transcript_api import YouTubeTranscriptApi
 
           API_ID = 24629594
           API_HASH = "a79fa760e65af09a85eb2cc97cb2263c"
@@ -155,49 +155,41 @@ jobs:
               return os.path.isfile(out)
 
           async def run_pipeline():
-              print("\n📥 Extracting available transcript natively using yt-dlp...")
-              
-              ydl_opts = {
-                  'writesubtitles': True,
-                  'writeautomaticsub': True,
-                  'subtitleslangs': ['all'],
-                  'skip_download': True,
-                  'outtmpl': os.path.join(TMP, 'sub.%(lang)s'),
-                  'cookiefile': COOKIES if os.path.exists(COOKIES) else None,
-                  'ignoreerrors': True,
-                  'quiet': True
-              }
-              
-              try:
-                  with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                      ydl.download([YT_URL])
-              except Exception as e:
-                  print(f"⚠️ yt-dlp caption download status: {e}")
-                  
-              sub_files = glob.glob(os.path.join(TMP, 'sub.*'))
+              print("\n📥 Extracting transcript securely via API-independent tool...")
+              vid = vid_id(YT_URL)
               lines = []
               
-              if sub_files:
-                  valid_subs = [f for f in sub_files if not f.endswith('.json') and os.path.isfile(f)]
-                  if valid_subs:
-                      chosen_sub = valid_subs[0]
-                      print(f"✅ Found and using subtitle file: {chosen_sub}")
-                      try:
-                          for caption in webvtt.read(chosen_sub):
-                              start_time = caption.start.split('.')[0]
-                              text_clean = caption.text.replace('\n', ' ').strip()
-                              if text_clean and (not lines or text_clean != lines[-1].split(' | ')[-1]):
-                                  lines.append(f"{start_time} | {text_clean}")
-                      except Exception as e:
-                          print(f"❌ Error parsing subtitle file: {e}")
+              try:
+                  # جلب قائمة جميع التراجم المتوفرة للفيديو (تلقائية أو أصلية بجميع اللغات)
+                  transcript_list = YouTubeTranscriptApi.list_transcripts(vid)
+                  
+                  # محاولة جلب الترجمة العربية أولاً، وإذا لم تتوفر يجلب الترجمة الافتراضية بأي لغة كانت تلقائياً
+                  try:
+                      srt = transcript_list.find_transcript(['ar']).fetch()
+                      print("✅ Arabic transcript selected.")
+                  except:
+                      srt = transcript_list.find_transcript(['en', 'fr', 'es', 'de']).fetch()
+                      print("✅ Alternative available language transcript selected.")
+                      
+                  for item in srt:
+                      seconds = float(item['start'])
+                      h = int(seconds // 3600)
+                      m = int((seconds % 3600) // 60)
+                      s = int(seconds % 60)
+                      t_str = f"{h:02d}:{m:02d}:{s:02d}"
+                      txt = item['text'].replace('\n', ' ').strip()
+                      if txt:
+                          lines.append(f"{t_str} | {txt}")
+              except Exception as e:
+                  print(f"❌ YouTube Transcript API failed: {e}")
               
               transcript = '\n'.join(lines)
               if not transcript.strip():
-                  print("❌ Could not extract any text transcript from this video.")
-                  await tg_msg("❌ فشل استخراج النص التلقائي للفيديو المختار (لا توجد أي ترجمة متوفرة بملف الفيديو)")
+                  print("❌ Could not extract text from this video.")
+                  await tg_msg("❌ فشل استخراج النص: هذا الفيديو لا يحتوي على أي ملف ترجمة مفعل حالياً.")
                   sys.exit(1)
 
-              print(f"✅ Processed {len(lines)} formatted lines natively.")
+              print(f"✅ Processed {len(lines)} formatted lines successfully.")
 
               # ============== STEP 2: Gemini Analysis ==============
               print("\n🤖 Analyzing with Gemini...")
@@ -229,7 +221,6 @@ jobs:
               print("\n📥 Downloading video...")
               await tg_msg(f"✅ تم تحليل {len(segments)} مقطع\n📥 جاري تحميل الفيديو...")
 
-              # تم تحسين خيار الصيغة 'b' لضمان تحميل أي صيغة فيديو متاحة ومطابقة دون شروط معقدة
               opts = {
                   'format': 'b/best/bestvideo+bestaudio', 
                   'outtmpl': VIDEO, 
