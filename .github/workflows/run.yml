@@ -57,7 +57,7 @@ jobs:
           COOKIES_TEXT = os.environ.get('COOKIES_TEXT', '')
           GEMINI_KEY = os.environ.get('GEMINI_API_KEY', '')
 
-          BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+          BASE_DIR = os.getcwd()
           TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
           COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
           SUB_OUTPUT = os.path.join(BASE_DIR, "sub_file")
@@ -107,7 +107,7 @@ jobs:
           except Exception as e: print(f"⚠️ Assets setup warning: {e}")
 
           if COOKIES_TEXT:
-              with open(COOKIES_FILE, "w", encoding="utf-8") as f: f.write(COOKIES_TEXT)
+              with open(COOKIES_FILE, "w", encoding="utf-8") as f: f.write(COOKIES_TEXT.strip())
           else:
               tg_msg("❌ خطأ: لم يتم العثور على سيكرت الكوكيز COOKIES_TEXT")
               sys.exit(1)
@@ -118,6 +118,7 @@ jobs:
           res = subprocess.run(cmd, capture_output=True, text=True)
           
           if res.returncode != 0 or not os.path.exists(TEMP_VIDEO):
+              print(f"yt-dlp Error Log: {res.stderr}")
               tg_msg("❌ فشل تحميل الفيديو من يوتيوب.")
               sys.exit(1)
 
