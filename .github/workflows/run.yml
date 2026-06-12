@@ -41,7 +41,7 @@ jobs:
           import re
           import subprocess
           import requests
-          from youtube_transcript_api import YouTubeTranscriptApi
+          import youtube_transcript_api
 
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
           YT_URL = os.environ['YT_URL']
@@ -105,18 +105,18 @@ jobs:
           size_mb = os.path.getsize(TEMP_VIDEO) / (1024 * 1024)
           print(f"✅ Download successful! File size: {size_mb:.2f} MB")
 
-          # 3. خطوة استخراج الترجمة وحفظها في ملف نصي
+          # 3. خطوة استخراج الترجمة وحفظها في ملف نصي بالشكل الصحيح للمكتبة
           print("\n📜 Extracting transcript...")
           v_id = vid_id(YT_URL)
           lines = []
           
           try:
-              # محاولة جلب الترجمة العربية أولاً، وتجربة الإنجليزية تلقائياً كبديل
+              # استدعاء الدالة بحروف صغيرة مباشرة لتفادي خطأ الأتريبيوت
               try:
-                  srt = YouTubeTranscriptApi.get_transcript(v_id, languages=['ar'])
+                  srt = youtube_transcript_api.YouTubeTranscriptApi.get_transcript(v_id, languages=['ar'])
                   print("✅ Arabic transcript extracted.")
               except:
-                  srt = YouTubeTranscriptApi.get_transcript(v_id, languages=['en', 'fr', 'es'])
+                  srt = youtube_transcript_api.YouTubeTranscriptApi.get_transcript(v_id, languages=['en', 'fr', 'es'])
                   print("✅ Alternative language transcript extracted.")
                   
               for item in srt:
