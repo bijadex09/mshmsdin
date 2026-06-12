@@ -29,11 +29,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg fontconfig
-          pip install yt-dlp telethon requests Pillow webrtcvad
+          pip install yt-dlp requests Pillow webrtcvad
           pip install --upgrade pip
           pip install --upgrade yt-dlp
 
-      - name: Pipeline Execution (Download, VAD, Merge & Telethon Upload)
+      - name: Pipeline Execution (Download, VAD, Merge & Official Bot Upload)
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           TG_TARGET: ${{ github.event.inputs.telegram_target }}
@@ -52,9 +52,8 @@ jobs:
           import subprocess
           import requests
           import urllib.request
-          from telethon import TelegramClient
 
-          # بيانات التليجرام المرفقة وتيليثون
+          # بيانات التطبيق وتوكن البوت الرسمية تم دمجها هنا مباشرة
           API_ID = 24629594
           API_HASH = "a79fa760e65af09a85eb2cc97cb2263c"
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
@@ -92,7 +91,18 @@ jobs:
                   requests.post(url, json={"chat_id": int(TG_TARGET), "text": text}, timeout=15)
               except: pass
 
-          # تفعيل وإعداد خطوط النظام والخلفيات
+          def tg_send_video(filepath, caption):
+              try:
+                  url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
+                  with open(filepath, 'rb') as video_file:
+                      files = {'video': video_file}
+                      data = {'chat_id': int(TG_TARGET), 'caption': caption, 'supports_streaming': True}
+                      res = requests.post(url, files=files, data=data, timeout=120)
+                      return res.status_code == 200
+              except Exception as e:
+                  print(f"⚠️ Upload error: {e}")
+                  return False
+
           try:
               if not os.path.exists(CACHED_FONT): urllib.request.urlretrieve(FONT_URL, CACHED_FONT)
               if not os.path.exists(CACHED_BG_SHORT): urllib.request.urlretrieve(BACKGROUND_SHORT_URL, CACHED_BG_SHORT)
@@ -108,7 +118,7 @@ jobs:
               tg_msg("❌ خطأ: لم يتم العثور على سيكرت الكوكيز COOKIES_TEXT")
               sys.exit(1)
 
-          # 1. تحميل الفيديو الأساسي بدقة فائقة
+          # 1. تحميل الفيديو الأساسي
           print("\n📥 Downloading main video...")
           tg_msg("📥 جاري تحميل الفيديو الأصلي بالدقة الكاملة...")
           cmd = ["yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node", "--remote-components", "ejs:github", "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", TEMP_VIDEO, YT_URL]
@@ -118,7 +128,7 @@ jobs:
               tg_msg("❌ فشل تحميل الفيديو من يوتيوب.")
               sys.exit(1)
 
-          # 2. استخراج الترجمة التلقائية
+          # 2. استخراج الترجمة
           print("\n📜 Extracting transcript VTT...")
           srt_cmd = ["yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node", "--remote-components", "ejs:github", "--skip-download", "--write-auto-sub", "--sub-lang", "ar", "--output", SUB_OUTPUT, YT_URL]
           subprocess.run(srt_cmd, capture_output=True, text=True)
@@ -137,7 +147,7 @@ jobs:
 
           if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
 
-          # 3. إرسال الترجمة لجيميناي لاستخلاص المصفوفة الزمنية للمقاطع
+          # 3. جيميناي
           with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f: transcript_data = f.read()
           
           user_prompt = f"""الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية. النص منسق كـ 'HH:MM:SS | النص'.
@@ -159,11 +169,9 @@ jobs:
           gemini_result = response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
           print("\n✨ Gemini Output:\n", gemini_result)
 
-          # دالة تنظيف المسافات والرموز من العناوين لصناعة أسماء ملفات آمنة
           def safe_title(t):
               return "".join(c for c in t if c.isalnum() or c in ' _-').replace(' ', '_')[:60]
 
-          # دالة معالجة وحذف الصمت بالـ VAD من المقطع المقطوع
           def remove_silence(inp, outp):
               try:
                   import webrtcvad
@@ -221,7 +229,6 @@ jobs:
                   print(f"VAD Error: {e}")
                   shutil.copy2(inp, outp)
 
-          # دالة إنتاج الصورة الحاملة لعنوان السؤال الديني منسقة آر تي إل
           def create_image(title, output_img):
               w_count = len(title.strip().split())
               bg = CACHED_BG_LONG if w_count >= 7 else CACHED_BG_SHORT
@@ -245,7 +252,7 @@ jobs:
                   subprocess.run(['ffmpeg', '-y', '-i', bg, '-vf', f"drawtext=fontfile='{FONT_FULL_PATH}':text='{title}':x=(w-text_w)/2:y=1390:fontcolor=white:fontsize={f_size}", '-frames:v', '1', output_img], quiet=True)
               if os.path.exists(t_svg): os.remove(t_svg)
 
-          # 4. تفكيك الأسطر وبدء المعالجة والرفع التتابعي فوراً (مقطع بمقطع) عبر تيليثون
+          # 4. تفكيك المقاطع والرفع التتابعي المباشر للبوت
           clips = []
           for line in gemini_result.strip().split('\n'):
               if '|' in line:
@@ -258,51 +265,44 @@ jobs:
               tg_msg("⚠️ لم يعثر جيميناي على مقاطع أسئلة واضحة ومطابقة للبرومبت.")
               sys.exit(0)
 
-          tg_msg(f"🚀 تم العثور على ({len(clips)}) مقطع سؤال وجواب ديني. جاري الإنتاج والرفع التتابعي للقناة عبر تيليثون...")
+          tg_msg(f"🚀 تم العثور على ({len(clips)}) مقطع سؤال وجواب ديني. جاري الإنتاج والرفع التتابعي للقناة عبر البوت الرسمي مباشرة...")
 
-          # بدء تشغيل التيليثون كلاينت بواسطة البوت توكن لتخطي أحجام 20MB للـ API العادي
-          client = TelegramClient('github_session', API_ID, API_HASH)
-          
-          async def upload_pipeline():
-              await client.start(bot_token=BOT_TOKEN)
+          for idx, clip in enumerate(clips, 1):
+              print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']}")
+              safe_name_str = safe_title(clip['title'])
               
-              for idx, clip in enumerate(clips, 1):
-                  print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']}")
-                  safe_name_str = safe_title(clip['title'])
-                  
-                  raw_clip = os.path.join(BASE_DIR, f"raw_{idx}.mp4")
-                  vad_clip = os.path.join(BASE_DIR, f"vad_{idx}.mp4")
-                  final_img = os.path.join(BASE_DIR, f"img_{idx}.png")
-                  reel_output = os.path.join(BASE_DIR, f"{idx:02d}_{safe_name_str}.mp4")
-                  
-                  # أ. قص المقطع الأولي
-                  cut_cmd = ['ffmpeg', '-y', '-ss', clip['start'], '-to', clip['end'], '-i', TEMP_VIDEO, '-c', 'copy', '-loglevel', 'error', raw_clip]
-                  if subprocess.run(cut_cmd).returncode != 0: continue
-                  
-                  # ب. معالجة الصمت بالـ VAD
-                  remove_silence(raw_clip, vad_clip)
-                  
-                  # ج. توليد صورة الغلاف بالعنوان المنسق
-                  create_image(clip['title'], final_img)
-                  
-                  # د. الدمج الرأسي والإنتاج بصيغة المقطع القصير Reel
-                  filter_complex = "[0:v]loop=loop=-1:size=1:start=0,setpts=PTS-STARTPTS,scale=1080:1920[bg]; [1:v]setpts=PTS-STARTPTS,crop=ih*4/5:ih:(iw-ow)/2:0,scale=820:1026[v_final]; [bg][v_final]overlay=(W-w)/2:150:shortest=1"
-                  merge_cmd = ["ffmpeg", "-y", "-i", final_img, "-i", vad_clip, "-filter_complex", filter_complex, "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-b:a", "96k", "-shortest", reel_output, "-loglevel", "error"]
-                  
-                  if subprocess.run(merge_cmd).returncode == 0 and os.path.exists(reel_output):
-                      size_mb = os.path.getsize(reel_output) / (1024 * 1024)
-                      print(f"✅ Produced Reel ({size_mb:.2f} MB). Uploading via Telethon...")
-                      
-                      # هـ. الرفع المباشر والآمن للقناة مهما كان الحجم متجاوزاً القيود القديمة
-                      caption_text = f"🎥 {clip['title']}\n\n⏱ التوقيت الأصلي: {clip['start']} 👈 {clip['end']}\n⚙️ تم الإنتاج والحذف التلقائي للصمت بنجاح."
-                      await client.send_file(int(TG_TARGET), reel_output, caption=caption_text, supports_streaming=True)
-                      print(f"🚀 Sent Clip {idx} successfully to channel.")
-                  
-                  # و. مسح الملفات الوسيطة فوراً لتوفير المساحة وتجنب امتلاء القرص
-                  for temp_file in [raw_clip, vad_clip, final_img, reel_output]:
-                      if os.path.exists(temp_file): os.remove(temp_file)
-                      
-          with client:
-              client.loop.run_until_complete(upload_pipeline())
+              raw_clip = os.path.join(BASE_DIR, f"raw_{idx}.mp4")
+              vad_clip = os.path.join(BASE_DIR, f"vad_{idx}.mp4")
+              final_img = os.path.join(BASE_DIR, f"img_{idx}.png")
+              reel_output = os.path.join(BASE_DIR, f"{idx:02d}_{safe_name_str}.mp4")
               
+              # أ. القص
+              cut_cmd = ['ffmpeg', '-y', '-ss', clip['start'], '-to', clip['end'], '-i', TEMP_VIDEO, '-c', 'copy', '-loglevel', 'error', raw_clip]
+              if subprocess.run(cut_cmd).returncode != 0: continue
+              
+              # ب. الـ VAD
+              remove_silence(raw_clip, vad_clip)
+              
+              # ج. الصورة والعنوان
+              create_image(clip['title'], final_img)
+              
+              # د. الدمج الرأسي Reel
+              filter_complex = "[0:v]loop=loop=-1:size=1:start=0,setpts=PTS-STARTPTS,scale=1080:1920[bg]; [1:v]setpts=PTS-STARTPTS,crop=ih*4/5:ih:(iw-ow)/2:0,scale=820:1026[v_final]; [bg][v_final]overlay=(W-w)/2:150:shortest=1"
+              merge_cmd = ["ffmpeg", "-y", "-i", final_img, "-i", vad_clip, "-filter_complex", filter_complex, "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-b:a", "96k", "-shortest", reel_output, "-loglevel", "error"]
+              
+              if subprocess.run(merge_cmd).returncode == 0 and os.path.exists(reel_output):
+                  size_mb = os.path.getsize(reel_output) / (1024 * 1024)
+                  print(f"✅ Produced Reel ({size_mb:.2f} MB). Uploading via Bot API...")
+                  
+                  caption_text = f"🎥 {clip['title']}\n\n⏱ التوقيت الأصلي: {clip['start']} 👈 {clip['end']}\n⚙️ تم الإنتاج والحذف التلقائي للصمت بنجاح."
+                  
+                  if tg_send_video(reel_output, caption_text):
+                      print(f"🚀 Sent Clip {idx} successfully.")
+                  else:
+                      print(f"❌ Failed to send Clip {idx}.")
+              
+              # و. تنظيف القرص الفوري لكل مقطع لحفظ المساحة
+              for temp_file in [raw_clip, vad_clip, final_img, reel_output]:
+                  if os.path.exists(temp_file): os.remove(temp_file)
+                  
           tg_msg("🏁 اكتملت الدورة البرمجية المؤتمتة بالكامل! تم إنتاج ورفع جميع المقاطع الدينية لقناتك بنجاح واكتمال تنظيف القرص.")
