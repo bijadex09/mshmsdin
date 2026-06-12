@@ -16,6 +16,9 @@ jobs:
   process:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -90,8 +93,6 @@ jobs:
               print("❌ Download failed!")
               tg_msg("❌ فشل تحميل الفيديو.")
               sys.exit(1)
-
-          size_mb = os.path.getsize(TEMP_VIDEO) / (1024 * 1024)
 
           print("\n📜 Extracting transcript...")
           srt_command = [
