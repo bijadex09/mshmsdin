@@ -146,15 +146,16 @@ jobs:
               return os.path.isfile(out)
 
           async def run_pipeline():
-              print("\n📥 Downloading Subtitles via yt-dlp...")
-              # استخدام الطريقة المجرّبة والناجحة لاستخراج ملف الترجمة بدقة
+              print("\n📥 Downloading Subtitles via yt-dlp Bypass...")
+              # تخطي الـ Challenge بتغيير الـ player_client إلى خدمات الهواتف والشاشات الذكية
               sub_opts = {
                   'skip_download': True,
                   'writeautomaticsub': True,
                   'subtitleslangs': ['ar'],
                   'outtmpl': 'sub_file',
                   'cookiefile': COOKIES if os.path.exists(COOKIES) else None,
-                  'quiet': True
+                  'quiet': True,
+                  'extractor_args': {'youtube': {'player_client': ['android', 'tv', 'web']}}
               }
               try:
                   with yt_dlp.YoutubeDL(sub_opts) as ydl:
@@ -164,10 +165,9 @@ jobs:
 
               if not os.path.isfile(SUBS):
                   print("❌ Subtitle file not found!")
-                  await tg_msg("❌ فشل استخراج ملف الترجمة من الفيديو")
+                  await tg_msg("❌ فشل استخراج ملف الترجمة من الفيديو بسبب قيود يوتيوب الجديدة")
                   sys.exit(1)
 
-              # قراءة وتحليل ملف الـ VTT
               lines = []
               try:
                   for caption in webvtt.read(SUBS):
@@ -225,8 +225,15 @@ jobs:
               print("\n📥 Downloading video...")
               await tg_msg(f"✅ تم تحليل {len(segments)} مقطع\n📥 جاري تحميل الفيديو...")
 
-              v_opts = {'format': 'best[height<=720]', 'outtmpl': VIDEO, 'quiet': True,
-                        'cookiefile': COOKIES if os.path.exists(COOKIES) else None, 'live_from_start': True}
+              # تطبيق نفس الالتفاف البرمجي لتجاوز حظر صيغ تحميل الفيديو
+              v_opts = {
+                  'format': 'best[height<=720]/best', 
+                  'outtmpl': VIDEO, 
+                  'quiet': True,
+                  'cookiefile': COOKIES if os.path.exists(COOKIES) else None, 
+                  'live_from_start': True,
+                  'extractor_args': {'youtube': {'player_client': ['android', 'tv', 'web']}}
+              }
               try:
                   with yt_dlp.YoutubeDL(v_opts) as ydl:
                       ydl.download([YT_URL])
@@ -311,7 +318,6 @@ jobs:
 
           asyncio.run(run_pipeline())
 
-          # تنظيف الملفات
           for f in [VIDEO, SUBS, COOKIES]:
               if os.path.isfile(f): os.remove(f)
           shutil.rmtree(TMP, ignore_errors=True)
