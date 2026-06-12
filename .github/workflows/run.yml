@@ -6,7 +6,7 @@ on:
       youtube_url:
         description: 'YouTube Video URL'
         required: true
-        default: 'https://www.youtube.com/watch?v=R36qfvXK3XQ'
+        default: 'https://www.youtube.com/live/R36qfvXK3XQ'
       telegram_target:
         description: 'Telegram Channel/User ID'
         required: true
@@ -18,14 +18,16 @@ jobs:
     steps:
       - name: Setup
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y ffmpeg
-          pip install yt-dlp telethon requests Pillow webrtcvad
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          pip install yt-dlp telethon requests Pillow webrtcvad youtube-transcript-api
           pip install --upgrade yt-dlp
 
       - name: Download Cookies
         run: |
           curl -sL "https://raw.githubusercontent.com/bijadex09/mshmsdin/main/cookies.txt" -o cookies.txt
-          echo "Cookies: $(wc -c < cookies.txt) bytes"
+          echo "Cookies size: $(wc -c < cookies.txt) bytes"
+          echo "Cookies lines: $(wc -l < cookies.txt)"
 
       - name: Process Video
         env:
@@ -34,10 +36,13 @@ jobs:
           TG_TARGET: ${{ github.event.inputs.telegram_target }}
         shell: python
         run: |
-          import os, re, json, sys, glob, shutil, asyncio, tempfile, subprocess, requests
+          import os, re, json, sys, glob, time, shutil, asyncio, tempfile, subprocess, requests
           from PIL import Image, ImageDraw, ImageFont
           from telethon import TelegramClient
-          import webrtcvad, wave
+          import yt_dlp
+          import webrtcvad
+          import wave
+          from youtube_transcript_api import YouTubeTranscriptApi
 
           API_ID = 24629594
           API_HASH = "a79fa760e65af09a85eb2cc97cb2263c"
@@ -45,20 +50,20 @@ jobs:
           GEMINI_KEY = os.environ['GEMINI_API_KEY']
           YT_URL = os.environ['YT_URL']
           TG_TARGET = os.environ['TG_TARGET']
-          COOKIES = 'cookies.txt'
           VIDEO = 'video.mp4'
-          SUBS = 'subs.txt'
+          COOKIES = 'cookies.txt'
           TMP = tempfile.mkdtemp()
 
-          def extract_video_id(u):
-              for p in [r'live/(\w+)', r'watch\?v=(\w+)', r'be/(\w+)', r'shorts/(\w+)']:
-                  m = re.search(p, u)
-                  if m: return m.group(1)
+          def vid_id(u):
+              patterns = [r"youtu\.be/([^&?/]+)", r"youtube\.com/watch\?v=([^&?/]+)", r"youtube\.com/embed/([^&?/]+)", r"youtube\.com/live/([^&?/]+)"]
+              for pattern in patterns:
+                  match = re.search(pattern, u)
+                  if match: return match.group(1)
               return None
 
           def t2s(t):
               p = list(map(int, t.strip().split(':')))
-              return p[0]*3600 + p[1]*60 + p[2] if len(p)==3 else p[0]*60 + p[1]
+              return p[0]*3600 + p[1]*60 + p[2] if len(p)==3 else p[0]*60 + p[1] if len(p)==2 else 0
 
           def s2t(s):
               return f"{int(s//3600):02d}:{int(s%3600//60):02d}:{int(s%60):02d}"
@@ -67,187 +72,10 @@ jobs:
               try:
                   c = TelegramClient('x', API_ID, API_HASH)
                   await c.start(bot_token=BOT_TOKEN)
-                  await c.send_message(int(TG_TARGET), text, link_preview=False)
+                  await c.send_message(int(TG_TARGET), text)
                   await c.disconnect()
               except: pass
 
-          # ============== تحويل الرابط إلى watch ==============
-          vid = extract_video_id(YT_URL)
-          WATCH_URL = f"https://www.youtube.com/watch?v={vid}"
-          print(f"📋 Video ID: {vid}")
-          print(f"🔗 Using: {WATCH_URL}")
-
-          # ============== STEP 1: Get transcript from YouTube page ==============
-          print("\n📥 Getting transcript from YouTube page...")
-          
-          sess = requests.Session()
-          
-          # Load cookies
-          with open(COOKIES) as f:
-              for line in f:
-                  if line.startswith('#') or not line.strip(): continue
-                  parts = line.strip().split('\t')
-                  if len(parts) >= 7 and 'youtube' in parts[0]:
-                      sess.cookies.set(parts[5], parts[6], domain=parts[0])
-
-          headers = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept-Language': 'ar,en;q=0.9',
-          }
-
-          # Get YouTube page
-          r = sess.get(WATCH_URL, headers=headers, timeout=30)
-          print(f"  Page status: {r.status_code}")
-
-          transcript_text = ""
-          
-          # Try to find captions in page
-          captions_match = re.search(r'"captions":\s*(\{.*?\}),\s*"videoDetails"', r.text, re.DOTALL)
-          if captions_match:
-              try:
-                  captions_json = json.loads(captions_match.group(1))
-                  tracks = captions_json.get('playerCaptionsTracklistRenderer', {}).get('captionTracks', [])
-                  print(f"  Found {len(tracks)} caption tracks")
-                  
-                  for track in tracks:
-                      lang = track.get('languageCode', '')
-                      name = track.get('name', {}).get('simpleText', '')
-                      url = track.get('baseUrl', '')
-                      print(f"    - {name} ({lang})")
-                      
-                      if lang == 'ar' and url:
-                          print(f"  ✅ Downloading Arabic captions...")
-                          sr = sess.get(url, headers=headers, timeout=30)
-                          if sr.status_code == 200:
-                              # Parse XML to text
-                              import xml.etree.ElementTree as ET
-                              root = ET.fromstring(sr.text)
-                              lines = []
-                              for txt in root.iter('{http://www.w3.org/2006/10/ttaf1}text'):
-                                  start = float(txt.get('start', 0))
-                                  text = ''.join(txt.itertext()).strip()
-                                  if text:
-                                      lines.append(f"{s2t(start)} | {text}")
-                              if lines:
-                                  transcript_text = '\n'.join(lines)
-                                  break
-              except Exception as e:
-                  print(f"  ⚠️ Parse error: {e}")
-
-          # Fallback: Use yt-dlp with watch URL
-          if not transcript_text:
-              print("\n🔄 Fallback: yt-dlp with watch URL...")
-              try:
-                  import yt_dlp
-                  opts = {
-                      'quiet': True, 'skip_download': True,
-                      'writeautomaticsub': True, 'subtitleslangs': ['ar'],
-                      'subtitlesformat': 'srt', 'outtmpl': f'sub_{vid}',
-                      'cookiefile': COOKIES,
-                  }
-                  with yt_dlp.YoutubeDL(opts) as ydl:
-                      ydl.download([WATCH_URL])
-                  
-                  for f in glob.glob(f'sub_{vid}*.srt'):
-                      if os.path.isfile(f) and os.path.getsize(f) > 100:
-                          with open(f, encoding='utf-8') as sf:
-                              srt = sf.read()
-                          lines = []
-                          for block in srt.strip().split('\n\n'):
-                              parts = block.strip().split('\n')
-                              if len(parts) >= 3:
-                                  tm = re.search(r'(\d{2}:\d{2}:\d{2})', parts[1])
-                                  if tm:
-                                      txt = ' '.join(parts[2:])
-                                      txt = re.sub(r'<[^>]+>', '', txt)
-                                      lines.append(f"{tm.group(1)} | {txt}")
-                          if lines:
-                              transcript_text = '\n'.join(lines)
-                          os.remove(f)
-                          break
-              except Exception as e:
-                  print(f"  ⚠️ yt-dlp fallback: {e}")
-
-          if not transcript_text:
-              print("❌ No transcript found!")
-              await tg_msg("❌ لم يتم العثور على ترجمة للفيديو")
-              sys.exit(1)
-
-          with open(SUBS, 'w', encoding='utf-8') as f:
-              f.write(transcript_text)
-          
-          lines_count = transcript_text.count('\n') + 1
-          print(f"✅ Got {lines_count} transcript lines")
-          print(f"  Preview: {transcript_text[:200]}")
-
-          # ============== STEP 2: Gemini ==============
-          print("\n🤖 Analyzing with Gemini...")
-          
-          prompt = f"""حلل النص واستخرج المواضيع الرئيسية مع أوقاتها:
-          • HH:MM:SS | عنوان الموضوع
-
-          النص:
-          {transcript_text[:50000]}"""
-
-          resp = requests.post(
-              f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
-              json={"contents":[{"parts":[{"text":prompt}]}],"generationConfig":{"temperature":0.1,"maxOutputTokens":8192}},
-              timeout=300
-          )
-
-          if resp.status_code != 200:
-              print(f"❌ Gemini error: {resp.status_code}")
-              await tg_msg("❌ فشل تحليل الترجمة")
-              sys.exit(1)
-
-          stamps_text = resp.json()['candidates'][0]['content']['parts'][0]['text']
-          print(stamps_text[:500])
-
-          segments = re.findall(r'•\s*([\d:]+)\s*\|\s*(.+)', stamps_text)
-          if not segments:
-              segments = re.findall(r'([\d:]{7,8})\s*\|\s*(.+)', stamps_text)
-
-          if not segments:
-              print("❌ No segments found!")
-              sys.exit(1)
-
-          print(f"✅ {len(segments)} segments extracted")
-          for t, title in segments[:5]:
-              print(f"  [{t}] {title[:60]}")
-
-          # ============== STEP 3: Download Video ==============
-          print("\n📥 Downloading video...")
-          await tg_msg(f"✅ تم تحليل {len(segments)} مقطع\n📥 جاري تحميل الفيديو...")
-
-          try:
-              import yt_dlp
-              opts = {
-                  'format': 'best[height<=720]',
-                  'outtmpl': VIDEO,
-                  'quiet': True,
-                  'cookiefile': COOKIES,
-              }
-              with yt_dlp.YoutubeDL(opts) as ydl:
-                  ydl.download([WATCH_URL])
-          except Exception as e:
-              print(f"  ⚠️ Download error: {e}")
-              # Try without cookies
-              opts['cookiefile'] = None
-              try:
-                  with yt_dlp.YoutubeDL(opts) as ydl:
-                      ydl.download([WATCH_URL])
-              except:
-                  print("❌ Download failed!")
-                  sys.exit(1)
-
-          if not os.path.isfile(VIDEO):
-              print("❌ Video file not found!")
-              sys.exit(1)
-
-          vsize = os.path.getsize(VIDEO)/1024/1024
-          print(f"✅ Downloaded: {vsize:.1f} MB")
-
-          # ============== Helper Functions ==============
           def thumbnail(title, path):
               w, h = 1080, 1920
               img = Image.new('RGB', (w,h), '#1a1a2e')
@@ -279,7 +107,7 @@ jobs:
 
           def cut(s, e, o):
               subprocess.run(['ffmpeg','-y','-i',VIDEO,'-ss',s,'-to',e,'-c','copy','-loglevel','error',o], capture_output=True)
-              return os.path.isfile(o) and os.path.getsize(o) > 0
+              return os.path.isfile(o)
 
           def merge(v, i, o):
               fc = "[1:v]loop=-1:size=1,setpts=PTS-STARTPTS,scale=1080:1920[img];[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[vid];[img][vid]overlay=0:0:shortest=1"
@@ -290,7 +118,7 @@ jobs:
               td = tempfile.mkdtemp()
               ta = os.path.join(td, 'a.wav')
               subprocess.run(['ffmpeg','-y','-i',inp,'-ar','16000','-ac','1','-loglevel','quiet',ta], capture_output=True)
-              if not os.path.isfile(ta): shutil.rmtree(td); return False
+              if not os.path.isfile(ta): return False
               vad = webrtcvad.Vad(3)
               with wave.open(ta,'rb') as w:
                   rate, frames = w.getframerate(), w.readframes(w.getnframes())
@@ -304,19 +132,18 @@ jobs:
                       elif not iss and sp: sp = False; segs.append((st, ct+0.3))
                   except: continue
               if sp: segs.append((st, len(frames)/(rate*2)))
-              if not segs: shutil.copy2(inp, out); shutil.rmtree(td); return True
+              if not segs: shutil.copy2(inp, out); return True
               ms = [segs[0]]
               for s in segs[1:]:
                   if s[0]-ms[-1][1] <= 0.5: ms[-1] = (ms[-1][0], s[1])
                   else: ms.append(s)
-              cf = os.path.join(td, 'c.txt')
-              with open(cf,'w') as f:
+              with open(os.path.join(td,'c.txt'),'w') as f:
                   for i,(s,e) in enumerate(ms):
                       if e-s < 0.5: continue
                       sf = os.path.join(td, f's{i:03d}.mp4')
                       subprocess.run(['ffmpeg','-y','-i',inp,'-ss',str(s),'-to',str(e),'-c','copy','-loglevel','quiet',sf], capture_output=True)
                       if os.path.isfile(sf): f.write(f"file '{sf}'\n")
-              ok = subprocess.run(['ffmpeg','-y','-f','concat','-safe','0','-i',cf,'-c','copy','-loglevel','quiet',out], capture_output=True).returncode==0
+              ok = subprocess.run(['ffmpeg','-y','-f','concat','-safe','0','-i',os.path.join(td,'c.txt'),'-c','copy','-loglevel','quiet',out], capture_output=True).returncode==0
               shutil.rmtree(td, ignore_errors=True)
               return ok
 
@@ -324,10 +151,91 @@ jobs:
               subprocess.run(['ffmpeg','-y','-i',inp,'-c:v','libx264','-preset','ultrafast','-crf','35','-c:a','aac','-b:a','48k','-fs',f'{mb}M','-loglevel','error',out], capture_output=True)
               return os.path.isfile(out)
 
-          # ============== STEP 4: Process & Send ==============
-          print(f"\n🎬 Processing {len(segments)} clips...")
+          async def run_pipeline():
+              # ============== STEP 1: Get Transcript (API METHOD) ==============
+              print("\n📥 Getting transcript via Transcript API...")
+              vid = vid_id(YT_URL)
+              print(f"Video ID: {vid}")
 
-          async def main():
+              lines = []
+              try:
+                  # استخراج الترجمة التلقائية أو اليدوية (العربية أو الإنجليزية كبديل)
+                  try:
+                      tl = YouTubeTranscriptApi.list_transcripts(vid)
+                      ts = tl.find_generated_transcript(['ar', 'en']).fetch()
+                  except:
+                      ts = YouTubeTranscriptApi.get_transcript(vid, languages=['ar', 'en'])
+
+                  for snippet in ts:
+                      seconds = snippet['start']
+                      h = int(seconds // 3600)
+                      m = int((seconds % 3600) // 60)
+                      s = int(seconds % 60)
+                      t_str = f"{h:02d}:{m:02d}:{s:02d}"
+                      txt = snippet['text'].replace('\n', ' ').strip()
+                      if txt:
+                          lines.append(f"{t_str} | {txt}")
+              except Exception as e:
+                  print(f"❌ API Method failed: {e}")
+
+              transcript = '\n'.join(lines)
+              
+              if not transcript.strip():
+                  print("❌ No transcript found using API Method!")
+                  await tg_msg("❌ لم يتم العثور على ترجمة للفيديو")
+                  sys.exit(1)
+
+              print(f"✅ Got {len(lines)} lines of transcript")
+
+              # ============== STEP 2: Gemini Analysis ==============
+              print("\n🤖 Analyzing with Gemini...")
+              prompt = f"""حلل النص واستخرج المواضيع الرئيسية مع أوقاتها:
+              • HH:MM:SS | عنوان الموضوع
+
+              النص:
+              {transcript[:50000]}"""
+
+              resp = requests.post(
+                  f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
+                  json={"contents":[{"parts":[{"text":prompt}]}],"generationConfig":{"temperature":0.1,"maxOutputTokens":8192}},
+                  timeout=300
+              )
+
+              if resp.status_code != 200:
+                  print(f"❌ Gemini error: {resp.status_code}")
+                  await tg_msg("❌ فشل تحليل الترجمة")
+                  sys.exit(1)
+
+              stamps_text = resp.json()['candidates'][0]['content']['parts'][0]['text']
+              segments = re.findall(r'•\s*([\d:]+)\s*\|\s*(.+)', stamps_text)
+              if not segments:
+                  segments = re.findall(r'([\d:]{7,8})\s*\|\s*(.+)', stamps_text)
+
+              print(f"\n✅ Found {len(segments)} segments")
+
+              # ============== STEP 3: Download Video ==============
+              print("\n📥 Downloading video...")
+              await tg_msg(f"✅ تم تحليل {len(segments)} مقطع\n📥 جاري تحميل الفيديو...")
+
+              opts = {'format': 'best[height<=720]', 'outtmpl': VIDEO, 'quiet': True,
+                      'cookiefile': COOKIES if os.path.exists(COOKIES) else None, 'live_from_start': True}
+              try:
+                  with yt_dlp.YoutubeDL(opts) as ydl:
+                      ydl.download([YT_URL])
+              except:
+                  opts['cookiefile'] = None
+                  with yt_dlp.YoutubeDL(opts) as ydl:
+                      ydl.download([YT_URL])
+
+              if not os.path.isfile(VIDEO):
+                  print("❌ Download failed!")
+                  sys.exit(1)
+
+              vsize = os.path.getsize(VIDEO)/1024/1024
+              print(f"✅ Downloaded: {vsize:.1f} MB")
+
+              # ============== STEP 4: Process & Send Clips ==============
+              print(f"\n🎬 Processing {len(segments)} clips...")
               client = TelegramClient('s', API_ID, API_HASH)
               await client.start(bot_token=BOT_TOKEN)
               target = int(TG_TARGET)
@@ -352,17 +260,17 @@ jobs:
                       if not cut(ss_str, es_str, cp):
                           fail += 1
                           continue
-                      print(f"  ✅ Cut: {os.path.getsize(cp)/1024/1024:.1f}MB")
                       
                       ip = os.path.join(td, 't.png')
+                      mp = cp
                       thumbnail(title, ip)
                       mp2 = os.path.join(td, 'm.mp4')
-                      mp = mp2 if merge(cp, ip, mp2) else cp
-                      if mp != cp: print("  ✅ Merged")
+                      if merge(cp, ip, mp2):
+                          mp = mp2
                       
                       fp = os.path.join(td, 'f.mp4')
                       if silence(mp, fp):
-                          print(f"  ✅ Silence removed: {os.path.getsize(fp)/1024/1024:.1f}MB")
+                          pass
                       else:
                           fp = mp
                       
@@ -371,7 +279,6 @@ jobs:
                       try:
                           await client.send_file(target, fp, caption=cap, supports_streaming=True)
                           sent += 1
-                          print("  ✅ Sent!")
                       except Exception as e:
                           if 'too big' in str(e).lower():
                               comp = os.path.join(td, 'comp.mp4')
@@ -383,10 +290,10 @@ jobs:
                               else: fail += 1
                           else:
                               fail += 1
-                              print(f"  ❌ {str(e)[:80]}")
                       
                       if (idx+1) % 5 == 0:
                           await client.send_message(target, f"📊 {idx+1}/{len(segments)} | ✅{sent} ❌{fail}")
+                      
                   finally:
                       shutil.rmtree(td, ignore_errors=True)
                   
@@ -395,10 +302,11 @@ jobs:
               await client.send_message(target, f"✅ **تم!**\n📊 {len(segments)} مقطع\n✅{sent} ❌{fail}")
               await client.disconnect()
 
-          asyncio.run(main())
+          # تشغيل خط الإنتاج البرمجي كاملاً داخل دالة الـ async بشكل صحيح
+          asyncio.run(run_pipeline())
 
-          # Cleanup
-          for f in [VIDEO, SUBS, COOKIES] + glob.glob('sub_*'):
-              if os.path.isfile(f): os.remove(f)
+          # تنظيف البيئة والملفات بعد الانتهاء
+          if os.path.exists(VIDEO): os.remove(VIDEO)
+          if os.path.exists(COOKIES): os.remove(COOKIES)
           shutil.rmtree(TMP, ignore_errors=True)
-          print("\n✅ Done!")
+          print("\n✅ All done!")
