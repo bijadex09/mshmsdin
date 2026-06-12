@@ -1,4 +1,4 @@
-name: YouTube Video & VTT Transcript Downloader
+name: YouTube Ultimate Quality & VTT Downloader
 
 on:
   workflow_dispatch:
@@ -58,7 +58,6 @@ jobs:
                   requests.post(url, json={"chat_id": int(TG_TARGET), "text": text}, timeout=10)
               except: pass
 
-          # 1. إنشاء ملف الكوكيز مؤقتاً
           if COOKIES_TEXT:
               with open(COOKIES_FILE, "w", encoding="utf-8") as f:
                   f.write(COOKIES_TEXT)
@@ -67,16 +66,16 @@ jobs:
               tg_msg("❌ خطأ: لم يتم العثور على السيكرت COOKIES_TEXT")
               sys.exit(1)
 
-          # 2. خطوة تحميل الفيديو الأساسية الناجحة
+          # تم تعديل الفلتر هنا لجلب أعلى جودة فيديو وصوت متوفرة ودمجهما بصيغة mp4 تلقائياً
           command = [
               "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
-              "--remote-components", "ejs:github", "-f", 
-              "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+              "--remote-components", "ejs:github", 
+              "-f", "bestvideo+bestaudio/best",
               "--merge-output-format", "mp4", "-o", TEMP_VIDEO, YT_URL
           ]
           
-          print("\n📥 Downloading video...")
-          tg_msg("📥 jari تحميل الفيديو أولاً...")
+          print("\n📥 Downloading video in maximum available quality...")
+          tg_msg("📥 جاري تحميل الفيديو بأعلى دقة متوفرة على يوتيوب...")
           
           video_success = False
           try:
@@ -88,14 +87,13 @@ jobs:
           if not video_success:
               if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
               print("❌ Download failed!")
-              tg_msg("❌ فشل تحميل الفيديو.")
+              tg_msg("❌ فشل تحميل الفيديو بالدقة القصوى.")
               sys.exit(1)
 
           size_mb = os.path.getsize(TEMP_VIDEO) / (1024 * 1024)
           print(f"✅ Download successful! File size: {size_mb:.2f} MB")
 
-          # 3. خطوة استخراج الترجمة باستخدام الأمر الخاص بك تماماً ومطابقة صيغة VTT
-          print("\n📜 Extracting transcript via your VTT method...")
+          print("\n📜 Extracting transcript via VTT method...")
           srt_command = [
               "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
               "--remote-components", "ejs:github", "--skip-download",
@@ -106,33 +104,28 @@ jobs:
               subprocess.run(srt_command, capture_output=True, text=True)
               
               if os.path.exists(EXPECTED_VTT):
-                  # قراءة ملف الـ VTT وتحويله لملف نصي منسق ومبسط
                   with open(EXPECTED_VTT, "r", encoding="utf-8") as vtt_f:
                       vtt_content = vtt_f.read()
                   
-                  # معالجة تنظيف نص VTT لاستخلاص الأسطر الهامة فقط
                   lines = []
                   for line in vtt_content.split('\n'):
                       line = line.strip()
                       if line and not line.startswith('WEBVTT') and not line.startswith('Kind:') and not line.startswith('Language:') and '-->' not in line:
-                          # منع التكرار العشوائي في ملفات VTT التلقائية
                           if not lines or lines[-1] != line:
                               lines.append(line)
                   
-                  # حفظ النص النهائي المنسق
                   FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
                   with open(FINAL_TRANSCRIPT, "w", encoding="utf-8") as f:
                       f.write('\n'.join(lines))
                   
                   print(f"✅ VTT Transcript saved successfully! Total lines: {len(lines)}")
-                  tg_msg(f"✅ تم تحميل الفيديو بنجاح ({size_mb:.2f} MB).\n📜 تم استخراج الترجمة بنجاح بصيغة VTT وحفظها.\n\nبانتظار توجيهاتك القادمة...")
+                  tg_msg(f"✅ تم تحميل الفيديو بأعلى دقة متوفرة بنجاح ({size_mb:.2f} MB).\n📜 تم استخراج الترجمة بنجاح ({len(lines)} سطر).\n\nأنا جاهز الآن لتلقي توجيهاتك القادمة!")
               else:
                   raise FileNotFoundError("Expected VTT subtitle file was not created")
                   
           except Exception as e:
               print(f"❌ VTT Extraction failed: {e}")
-              tg_msg(f"✅ تم تحميل الفيديو بنجاح ({size_mb:.2f} MB).\n⚠️ تنبيه: تعذر استخراج ملف الـ VTT من اليوتيوب.")
+              tg_msg(f"✅ تم تحميل الفيديو بالدقة القصوى ({size_mb:.2f} MB).\n⚠️ تنبيه: تعذر استخراج ملف الـ VTT.")
 
-          # حذف ملف الكوكيز فوراً للأمان
           if os.path.exists(COOKIES_FILE): 
               os.remove(COOKIES_FILE)
