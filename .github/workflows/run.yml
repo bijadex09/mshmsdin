@@ -6,7 +6,7 @@ on:
       youtube_url:
         description: 'YouTube Video URL'
         required: true
-        default: 'https://youtu.be/NdVhKakgGHM'
+        default: 'https://youtu.be/NdVhKakgHMM'
       telegram_target:
         description: 'Telegram Channel/User ID'
         required: true
@@ -18,12 +18,6 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: Setup Node.js & Global Image Tools
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - run: npm install -g sharp-cli
 
       - name: Setup System & Python Audio Dependencies
         run: |
@@ -52,8 +46,9 @@ jobs:
           import subprocess
           import requests
           import urllib.request
+          from PIL import Image, ImageDraw, ImageFont
 
-          # بيانات التطبيق وتوكن البوت الرسمية تم دمجها هنا مباشرة
+          # بيانات التطبيق وتوكن البوت الرسمية
           API_ID = 24629594
           API_HASH = "a79fa760e65af09a85eb2cc97cb2263c"
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
@@ -230,27 +225,29 @@ jobs:
                   shutil.copy2(inp, outp)
 
           def create_image(title, output_img):
-              w_count = len(title.strip().split())
-              bg = CACHED_BG_LONG if w_count >= 7 else CACHED_BG_SHORT
-              f_size = 70 if w_count >= 7 else (90 if w_count <= 3 else 68)
-              
-              if w_count >= 7:
-                  words = title.strip().split()
-                  h = (len(words) + 1) // 2
-                  l1, l2 = " ".join(words[:h]), " ".join(words[h:])
-                  svg_text = f'<text x="540" y="1390" class="title" direction="rtl">{l1}</text><text x="540" y="1500" class="title" direction="rtl">{l2}</text>'
-              else:
-                  svg_text = f'<text x="540" y="1390" class="title" direction="rtl">{title}</text>'
-                  
-              svg = f'<?xml version="1.0" encoding="UTF-8"?><svg width="1080" height="1920" xmlns="http://www.w3.org/2000/svg"><defs><style>@font-face {{ font-family: "Readex Pro"; src: url("{FONT_FULL_PATH}"); }} .title {{ fill: white; font-family: "Readex Pro", sans-serif; font-size: {f_size}px; font-weight: bold; text-anchor: middle; filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.5)); }}</style></defs>{svg_text}</svg>'
-              t_svg = output_img + ".svg"
-              with open(t_svg, "w", encoding="utf-8") as f: f.write(svg)
-              
               try:
-                  subprocess.run(['sharp', 'composite', t_svg, '--input', bg, '--output', output_img], check=True, capture_output=True)
-              except:
-                  subprocess.run(['ffmpeg', '-y', '-i', bg, '-vf', f"drawtext=fontfile='{FONT_FULL_PATH}':text='{title}':x=(w-text_w)/2:y=1390:fontcolor=white:fontsize={f_size}", '-frames:v', '1', output_img], quiet=True)
-              if os.path.exists(t_svg): os.remove(t_svg)
+                  w_count = len(title.strip().split())
+                  bg_path = CACHED_BG_LONG if w_count >= 7 else CACHED_BG_SHORT
+                  f_size = 62 if w_count >= 7 else (85 if w_count <= 3 else 66)
+                  
+                  img = Image.open(bg_path).convert("RGBA")
+                  draw = ImageDraw.Draw(img)
+                  font = ImageFont.truetype(FONT_FULL_PATH, f_size)
+                  
+                  # كتابة النص المنسق باللغة العربية متوافق مع الاتجاه من اليمين لليسار
+                  if w_count >= 7:
+                      words = title.strip().split()
+                      h = (len(words) + 1) // 2
+                      l1, l2 = " ".join(words[:h]), " ".join(words[h:])
+                      draw.text((540, 1370), l1, font=font, fill="white", anchor="mm")
+                      draw.text((540, 1470), l2, font=font, fill="white", anchor="mm")
+                  else:
+                      draw.text((540, 1390), title, font=font, fill="white", anchor="mm")
+                      
+                  img.convert("RGB").save(output_img, "PNG")
+              except Exception as e:
+                  print(f"⚠️ Pillow fail, falling back to FFmpeg drawtext: {e}")
+                  subprocess.run(['ffmpeg', '-y', '-i', bg_path, '-vf', f"drawtext=fontfile='{FONT_FULL_PATH}':text='{title}':x=(w-text_w)/2:y=1390:fontcolor=white:fontsize={f_size}", '-frames:v', '1', output_img], quiet=True)
 
           # 4. تفكيك المقاطع والرفع التتابعي المباشر للبوت
           clips = []
@@ -283,7 +280,7 @@ jobs:
               # ب. الـ VAD
               remove_silence(raw_clip, vad_clip)
               
-              # ج. الصورة والعنوان
+              # ج. الصورة والعنوان بواسطة Pillow السريعة
               create_image(clip['title'], final_img)
               
               # د. الدمج الرأسي Reel
