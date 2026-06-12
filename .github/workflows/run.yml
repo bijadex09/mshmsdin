@@ -1,4 +1,4 @@
-name: YouTube Video Downloader Only
+name: YouTube Video Downloader via Custom yt-dlp
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ jobs:
   process:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Node.js
+      - name: Setup Node.js (Required for js-runtime)
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -32,19 +32,24 @@ jobs:
         run: |
           curl -sL "https://raw.githubusercontent.com/bijadex09/mshmsdin/main/cookies.txt" -o cookies.txt
 
-      - name: Download Video Only
+      - name: Download Video Using Custom yt-dlp Method
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           TG_TARGET: ${{ github.event.inputs.telegram_target }}
         shell: python
         run: |
-          import os, sys, yt_dlp, requests
+          import os
+          import sys
+          import subprocess
+          import requests
 
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
           YT_URL = os.environ['YT_URL']
           TG_TARGET = os.environ['TG_TARGET']
-          VIDEO = 'video.mp4'
-          COOKIES = 'cookies.txt'
+          
+          BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+          TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
+          COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
           def tg_msg(text):
               try:
@@ -52,32 +57,33 @@ jobs:
                   requests.post(url, json={"chat_id": int(TG_TARGET), "text": text}, timeout=10)
               except: pass
 
-          print("\n📥 Downloading video directly...")
-          tg_msg("📥 جاري بدء تحميل الفيديو مباشرة...")
+          def download_video(url):
+              # تم استخدام نفس مصفوفة الأمر المتطورة الخاصة بك تماماً
+              command = [
+                  "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
+                  "--remote-components", "ejs:github", "-f", 
+                  "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+                  "--merge-output-format", "mp4", "-o", TEMP_VIDEO, url
+              ]
+              try:
+                  print(f"🚀 Running custom command: {' '.join(command)}")
+                  result = subprocess.run(command, capture_output=True, text=True)
+                  print(result.stdout)
+                  if result.returncode != 0:
+                      print(f"❌ yt-dlp error output:\n{result.stderr}")
+                  return result.returncode == 0 and os.path.exists(TEMP_VIDEO)
+              except Exception as e: 
+                  print(f"❌ Subprocess execution failed: {e}")
+                  return False
 
-          opts = {
-              'format': 'b/best/bestvideo+bestaudio', 
-              'outtmpl': VIDEO, 
-              'quiet': False,
-              'cookiefile': COOKIES if os.path.exists(COOKIES) else None, 
-              'live_from_start': True,
-              'ignoreerrors': True
-          }
-          
-          try:
-              with yt_dlp.YoutubeDL(opts) as ydl:
-                  ydl.download([YT_URL])
-          except Exception as e:
-              print(f"⚠️ Initial download try failed: {e}")
-              opts['cookiefile'] = None
-              with yt_dlp.YoutubeDL(opts) as ydl:
-                  ydl.download([YT_URL])
+          print("\n📥 Initiating secure video download via your exact yt-dlp specs...")
+          tg_msg("📥 جاري بدء تحميل الفيديو باستخدام الطريقة المخصصة المتقدمة...")
 
-          if os.path.isfile(VIDEO) and os.path.getsize(VIDEO) > 0:
-              size_mb = os.path.getsize(VIDEO) / (1024 * 1024)
+          if download_video(YT_URL):
+              size_mb = os.path.getsize(TEMP_VIDEO) / (1024 * 1024)
               print(f"✅ Download successful! File size: {size_mb:.2f} MB")
-              tg_msg(f"✅ تم تحميل الفيديو بنجاح واكتمال حفظه!\n📦 الحجم: {size_mb:.2f} ميجابايت.\n\nبانتظار توجيهاتك القادمة...")
+              tg_msg(f"✅ تم تحميل الفيديو بنجاح واكتمال حفظه بالطريقة الخاصة بك!\n📦 الحجم: {size_mb:.2f} ميجابايت.\n\nبانتظار توجيهاتك القادمة...")
           else:
-              print("❌ Download failed!")
-              tg_msg("❌ فشل تحميل الفيديو، يرجى التحقق من الرابط أو الكوكيز.")
+              print("❌ Custom download method failed!")
+              tg_msg("❌ فشل تحميل الفيديو باستخدام الطريقة المخصصة، يرجى التحقق من المدخلات.")
               sys.exit(1)
