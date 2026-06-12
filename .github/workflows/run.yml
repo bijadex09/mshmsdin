@@ -1,4 +1,4 @@
-name: YouTube Video Downloader via Custom yt-dlp
+name: YouTube Video Downloader via Bypass specs
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ jobs:
   process:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Node.js (Required for js-runtime)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -32,7 +32,7 @@ jobs:
         run: |
           curl -sL "https://raw.githubusercontent.com/bijadex09/mshmsdin/main/cookies.txt" -o cookies.txt
 
-      - name: Download Video Using Custom yt-dlp Method
+      - name: Download Video Using Bypass Method
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           TG_TARGET: ${{ github.event.inputs.telegram_target }}
@@ -58,15 +58,21 @@ jobs:
               except: pass
 
           def download_video(url):
-              # تم استخدام نفس مصفوفة الأمر المتطورة الخاصة بك تماماً
+              # تم إضافة محاكاة الـ User-Agent ومتغيرات الـ client لتجاوز حظر الـ Bot
               command = [
-                  "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
-                  "--remote-components", "ejs:github", "-f", 
-                  "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
-                  "--merge-output-format", "mp4", "-o", TEMP_VIDEO, url
+                  "yt-dlp", 
+                  "--cookies", COOKIES_FILE, 
+                  "--js-runtime", "node",
+                  "--remote-components", "ejs:github",
+                  "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                  "--extractor-args", "youtube:player-client=web,android;player_skip=web_embedded_player_bytecode",
+                  "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+                  "--merge-output-format", "mp4", 
+                  "-o", TEMP_VIDEO, 
+                  url
               ]
               try:
-                  print(f"🚀 Running custom command: {' '.join(command)}")
+                  print(f"🚀 Running bypass command: {' '.join(command)}")
                   result = subprocess.run(command, capture_output=True, text=True)
                   print(result.stdout)
                   if result.returncode != 0:
@@ -76,14 +82,14 @@ jobs:
                   print(f"❌ Subprocess execution failed: {e}")
                   return False
 
-          print("\n📥 Initiating secure video download via your exact yt-dlp specs...")
-          tg_msg("📥 جاري بدء تحميل الفيديو باستخدام الطريقة المخصصة المتقدمة...")
+          print("\n📥 Initiating secure video download with anti-bot bypass...")
+          tg_msg("📥 جاري محاولة تخطي حظر يوتيوب وتحميل الفيديو...")
 
           if download_video(YT_URL):
               size_mb = os.path.getsize(TEMP_VIDEO) / (1024 * 1024)
               print(f"✅ Download successful! File size: {size_mb:.2f} MB")
-              tg_msg(f"✅ تم تحميل الفيديو بنجاح واكتمال حفظه بالطريقة الخاصة بك!\n📦 الحجم: {size_mb:.2f} ميجابايت.\n\nبانتظار توجيهاتك القادمة...")
+              tg_msg(f"✅ تم تخطي الحظر وتحميل الفيديو بنجاح!\n📦 الحجم: {size_mb:.2f} ميجابايت.\n\nبانتظار توجيهاتك القادمة...")
           else:
-              print("❌ Custom download method failed!")
-              tg_msg("❌ فشل تحميل الفيديو باستخدام الطريقة المخصصة، يرجى التحقق من المدخلات.")
+              print("❌ Bypass download method failed!")
+              tg_msg("❌ فشل تحميل الفيديو، يوتيوب ما زال يرفض الخادم.")
               sys.exit(1)
