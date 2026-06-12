@@ -29,7 +29,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           pip install yt-dlp telethon requests Pillow webrtcvad
-          # تحديث yt-dlp لآخر إصدار
+          pip install youtube-transcript-api
           pip install --upgrade yt-dlp
 
       - name: Download cookies file
@@ -62,6 +62,8 @@ jobs:
           from pathlib import Path
           from PIL import Image, ImageDraw, ImageFont
           from telethon import TelegramClient
+          from youtube_transcript_api import YouTubeTranscriptApi
+          from youtube_transcript_api.formatters import SRTFormatter
           
           # ======================================================================
           # الإعدادات والثوابت
@@ -89,39 +91,17 @@ jobs:
           # ======================================================================
           # الدوال المساعدة
           # ======================================================================
-          def run_command_detailed(cmd, description=""):
-              """تشغيل أمر مع إظهار الأخطاء التفصيلية"""
-              print("\n  🔧 " + description)
-              print("  📝 Command: " + " ".join(cmd[:8]) + "...")
-              
-              try:
-                  result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-                  
-                  if result.stdout:
-                      stdout_lines = result.stdout.strip().split('\n')
-                      # إظهار آخر 5 أسطر فقط
-                      for line in stdout_lines[-5:]:
-                          if line.strip():
-                              print("  📤 " + line[:150])
-                  
-                  if result.returncode != 0:
-                      print("  ❌ Return code: " + str(result.returncode))
-                      if result.stderr:
-                          stderr_lines = result.stderr.strip().split('\n')
-                          # إظهار الأخطاء المهمة
-                          for line in stderr_lines[-10:]:
-                              if line.strip() and 'WARNING' not in line:
-                                  print("  ⚠️ " + line[:200])
-                      return False, ""
-                  
-                  return True, result.stdout
-                  
-              except subprocess.TimeoutExpired:
-                  print("  ⏰ Timeout!")
-                  return False, ""
-              except Exception as e:
-                  print("  💥 Exception: " + str(e)[:200])
-                  return False, ""
+          def extract_video_id(url):
+              """استخراج معرف الفيديو من رابط يوتيوب"""
+              patterns = [
+                  r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/|youtube\.com/live/)([a-zA-Z0-9_-]{11})',
+                  r'youtube\.com/watch\?.*v=([a-zA-Z0-9_-]{11})',
+              ]
+              for pattern in patterns:
+                  match = re.search(pattern, url)
+                  if match:
+                      return match.group(1)
+              return None
           
           def time_to_seconds(time_str):
               if not time_str: return 0
@@ -154,165 +134,131 @@ jobs:
                   print("  ⚠️ Telegram notification failed: " + str(e)[:100])
           
           # ======================================================================
-          # المرحلة 1: تحميل الترجمة
+          # المرحلة 1: استخراج الترجمة باستخدام YouTube Transcript API
           # ======================================================================
           print("\n" + "="*60)
-          print("📥 المرحلة 1: تحميل الترجمة (SRT)")
+          print("📥 المرحلة 1: استخراج الترجمة")
           print("="*60)
           
-          # عرض معلومات yt-dlp
-          success, version_info = run_command_detailed(
-              ['yt-dlp', '--version'],
-              "Checking yt-dlp version"
-          )
-          if success:
-              print("  ✅ yt-dlp version: " + version_info.strip())
+          video_id = extract_video_id(YOUTUBE_URL)
           
-          srt_downloaded = False
+          if not video_id:
+              print("❌ Could not extract video ID from URL: " + YOUTUBE_URL)
+              send_telegram_message("❌ فشل استخراج معرف الفيديو")
+              sys.exit(1)
           
-          # محاولة 1: ترجمة تلقائية مع cookies
-          print("\n  📥 Attempt 1: Auto-generated Arabic subtitles")
-          cmd1 = [
-              'yt-dlp',
-              '--cookies', COOKIES_FILE,
-              '--write-auto-subs',
-              '--sub-langs', 'ar',
-              '--convert-subs', 'srt',
-              '--skip-download',
-              '--output', 'subtitles',
-              '--verbose',
-              YOUTUBE_URL
-          ]
-          success1, output1 = run_command_detailed(cmd1, "Downloading auto subs")
+          print("📋 Video ID: " + video_id)
           
-          for f in glob.glob('*.ar.srt') + glob.glob('*.srt'):
-              if os.path.exists(f) and os.path.getsize(f) > 100:
-                  os.rename(f, SRT_FILENAME)
-                  srt_downloaded = True
-                  print("  ✅ Found SRT: " + f + " (" + str(os.path.getsize(SRT_FILENAME)) + " bytes)")
-                  break
+          srt_content = ""
+          transcript_found = False
           
-          # محاولة 2: ترجمة يدوية
-          if not srt_downloaded:
-              print("\n  📥 Attempt 2: Manual subtitles")
-              cmd2 = [
-                  'yt-dlp',
-                  '--cookies', COOKIES_FILE,
-                  '--write-subs',
-                  '--sub-langs', 'ar',
-                  '--convert-subs', 'srt',
-                  '--skip-download',
-                  '--output', 'subtitles',
-                  YOUTUBE_URL
-              ]
-              success2, output2 = run_command_detailed(cmd2, "Downloading manual subs")
+          # محاولة 1: الترجمة العربية التلقائية
+          print("\n🔄 محاولة 1: الترجمة العربية التلقائية...")
+          try:
+              transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
               
-              for f in glob.glob('*.ar.srt') + glob.glob('*.srt'):
-                  if os.path.exists(f) and os.path.getsize(f) > 100:
-                      os.rename(f, SRT_FILENAME)
-                      srt_downloaded = True
-                      print("  ✅ Found SRT: " + f)
-                      break
-          
-          # محاولة 3: بدون cookies
-          if not srt_downloaded:
-              print("\n  📥 Attempt 3: Without cookies")
-              cmd3 = [
-                  'yt-dlp',
-                  '--write-auto-subs',
-                  '--sub-langs', 'ar',
-                  '--convert-subs', 'srt',
-                  '--skip-download',
-                  '--output', 'subtitles',
-                  YOUTUBE_URL
-              ]
-              success3, output3 = run_command_detailed(cmd3, "Downloading without cookies")
+              # عرض جميع الترجمات المتاحة
+              print("\n📋 الترجمات المتاحة:")
+              for transcript in transcript_list:
+                  lang_name = transcript.language
+                  lang_code = transcript.language_code
+                  is_generated = transcript.is_generated
+                  is_translatable = transcript.is_translatable
+                  print("  - " + lang_name + " (" + lang_code + ")" + 
+                        (" [تلقائية]" if is_generated else " [يدوية]") +
+                        (" [قابلة للترجمة]" if is_translatable else ""))
               
-              for f in glob.glob('*.ar.srt') + glob.glob('*.srt'):
-                  if os.path.exists(f) and os.path.getsize(f) > 100:
-                      os.rename(f, SRT_FILENAME)
-                      srt_downloaded = True
-                      print("  ✅ Found SRT: " + f)
-                      break
-          
-          # محاولة 4: قائمة بجميع الترجمات المتاحة
-          if not srt_downloaded:
-              print("\n  📥 Attempt 4: List all available subtitles")
-              cmd4 = [
-                  'yt-dlp',
-                  '--cookies', COOKIES_FILE,
-                  '--list-subs',
-                  YOUTUBE_URL
-              ]
-              success4, output4 = run_command_detailed(cmd4, "Listing available subtitles")
-              
-              if success4 and output4:
-                  print("  📋 Available subtitles:")
-                  for line in output4.split('\n')[-20:]:
-                      if line.strip():
-                          print("     " + line[:150])
+              # محاولة الحصول على الترجمة العربية أولاً
+              try:
+                  transcript = transcript_list.find_transcript(['ar'])
+                  print("\n✅ Found Arabic transcript!")
+                  transcript_found = True
+              except:
+                  print("\n⚠️ Arabic transcript not found")
                   
-                  # محاولة تحميل أي ترجمة متاحة
-                  for lang in ['ar', 'en', 'fr', 'es', 'de', 'ru', 'zh']:
-                      if not srt_downloaded:
-                          print("\n  📥 Trying language: " + lang)
-                          cmd_lang = [
-                              'yt-dlp',
-                              '--cookies', COOKIES_FILE,
-                              '--write-auto-subs',
-                              '--sub-langs', lang,
-                              '--convert-subs', 'srt',
-                              '--skip-download',
-                              '--output', 'subtitles_' + lang,
-                              YOUTUBE_URL
-                          ]
-                          run_command_detailed(cmd_lang, "Trying " + lang)
-                          
-                          for f in glob.glob('*.' + lang + '.srt') + glob.glob('*.srt'):
-                              if os.path.exists(f) and os.path.getsize(f) > 100:
-                                  os.rename(f, SRT_FILENAME)
-                                  srt_downloaded = True
-                                  print("  ✅ Found SRT in " + lang + ": " + f)
-                                  break
+                  # محاولة الحصول على أي ترجمة وترجمتها للعربية
+                  for transcript in transcript_list:
+                      if transcript.is_translatable:
+                          try:
+                              transcript = transcript.translate('ar')
+                              print("✅ Translated " + transcript.language + " to Arabic!")
+                              transcript_found = True
+                              break
+                          except:
+                              continue
+                  
+                  # إذا لم نجد ترجمة قابلة للترجمة، خذ أي ترجمة متاحة
+                  if not transcript_found:
+                      try:
+                          transcript = transcript_list.find_transcript(['en', 'fr', 'es', 'de', 'ru', 'zh'])
+                          print("✅ Using " + transcript.language + " transcript")
+                          transcript_found = True
+                      except:
+                          print("❌ No transcripts available at all!")
           
-          if not srt_downloaded:
+          except Exception as e:
+              print("❌ Error accessing transcripts: " + str(e)[:200])
+              
+              # محاولة بديلة: استخدام yt-dlp فقط للترجمة
+              print("\n🔄 محاولة بديلة: yt-dlp لاستخراج الترجمة...")
+              try:
+                  cmd = [
+                      'yt-dlp',
+                      '--cookies', COOKIES_FILE,
+                      '--write-auto-subs',
+                      '--sub-langs', 'ar',
+                      '--convert-subs', 'srt',
+                      '--skip-download',
+                      '--output', 'subtitles',
+                      '--no-warnings',
+                      YOUTUBE_URL
+                  ]
+                  subprocess.run(cmd, capture_output=True, timeout=120)
+                  
+                  for f in glob.glob('*.ar.srt') + glob.glob('*.srt'):
+                      if os.path.exists(f) and os.path.getsize(f) > 100:
+                          with open(f, 'r', encoding='utf-8') as sf:
+                              srt_content = sf.read()
+                          transcript_found = True
+                          print("✅ Found SRT via yt-dlp: " + f)
+                          break
+              except:
+                  pass
+          
+          # تحويل الترجمة إلى SRT إذا تم العثور عليها
+          if transcript_found and not srt_content:
+              try:
+                  formatter = SRTFormatter()
+                  srt_content = formatter.format_transcript(transcript.fetch())
+                  print("✅ Transcript converted to SRT format")
+              except Exception as e:
+                  print("❌ Error formatting transcript: " + str(e)[:200])
+                  transcript_found = False
+          
+          if not transcript_found or not srt_content:
               print("\n" + "="*60)
-              print("❌ FAILED: Could not download any subtitles")
+              print("❌ FAILED: Could not get any transcript")
               print("="*60)
-              print("\n📝 Possible reasons:")
-              print("  1. Cookies file is expired or invalid")
-              print("  2. YouTube is blocking the request (n challenge)")
-              print("  3. Video doesn't have subtitles")
-              print("  4. Video is private or age-restricted")
-              print("\n💡 Solutions:")
-              print("  1. Update cookies file with fresh export from browser")
-              print("  2. Try a different video that has known subtitles")
-              print("  3. Make sure cookies are in Netscape format")
               
               error_msg = (
-                  "❌ **فشل تحميل الترجمة**\n\n"
+                  "❌ **فشل استخراج الترجمة**\n\n"
                   + "🔗 [الفيديو](" + YOUTUBE_URL + ")\n"
                   + "⚠️ لم يتم العثور على أي ترجمة\n\n"
-                  + "📝 **الأسباب المحتملة:**\n"
-                  + "• الكوكيز منتهية الصلاحية\n"
-                  + "• الفيديو لا يحتوي على ترجمة\n"
-                  + "• يوتيوب يحظر الطلب\n\n"
                   + "💡 **الحلول:**\n"
-                  + "• قم بتحديث ملف الكوكيز\n"
-                  + "• جرب فيديو آخر\n"
-                  + "• تأكد من تنسيق الكوكيز"
+                  + "• الفيديو لا يحتوي على ترجمة\n"
+                  + "• جرب فيديو آخر يحتوي على ترجمة"
               )
               send_telegram_message(error_msg)
               sys.exit(1)
           
-          # قراءة الترجمة
-          with open(SRT_FILENAME, 'r', encoding='utf-8') as f:
-              srt_content = f.read()
+          # حفظ ملف SRT
+          with open(SRT_FILENAME, 'w', encoding='utf-8') as f:
+              f.write(srt_content)
           
           srt_len = len(srt_content)
-          print("\n✅ Successfully downloaded subtitles!")
+          print("\n✅ Successfully got transcript!")
           print("   Size: " + str(srt_len) + " characters")
-          print("   Preview (first 200 chars): " + srt_content[:200].replace('\n', ' '))
+          print("   Preview: " + srt_content[:200].replace('\n', ' '))
           
           # ======================================================================
           # المرحلة 2: تحليل مع Gemini
@@ -321,7 +267,7 @@ jobs:
           print("🤖 المرحلة 2: تحليل مع Gemini Flash")
           print("="*60)
           
-          prompt = """الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية.
+          prompt = """الوثيقة هي نص تفريغ فيديو عربي.
 
           مهمتك: استخراج جميع الأسئلة والإجابات بدقة.
 
@@ -405,18 +351,37 @@ jobs:
           send_telegram_message(start_msg)
           
           print("\n📥 Downloading video...")
-          cmd_video = [
+          
+          video_downloaded = False
+          
+          # محاولة 1: مع cookies
+          cmd1 = [
               'yt-dlp',
               '--cookies', COOKIES_FILE,
               '--live-from-start',
               '--output', VIDEO_FILENAME,
-              '--verbose',
+              '--no-warnings',
               YOUTUBE_URL
           ]
+          result1 = subprocess.run(cmd1, capture_output=True, timeout=1800)
+          if result1.returncode == 0 and os.path.exists(VIDEO_FILENAME) and os.path.getsize(VIDEO_FILENAME) > 1000000:
+              video_downloaded = True
           
-          video_success, video_output = run_command_detailed(cmd_video, "Downloading video")
+          # محاولة 2: بدون cookies
+          if not video_downloaded:
+              print("🔄 Retrying without cookies...")
+              cmd2 = [
+                  'yt-dlp',
+                  '--live-from-start',
+                  '--output', VIDEO_FILENAME,
+                  '--no-warnings',
+                  YOUTUBE_URL
+              ]
+              result2 = subprocess.run(cmd2, capture_output=True, timeout=1800)
+              if result2.returncode == 0 and os.path.exists(VIDEO_FILENAME) and os.path.getsize(VIDEO_FILENAME) > 1000000:
+                  video_downloaded = True
           
-          if not video_success or not os.path.exists(VIDEO_FILENAME) or os.path.getsize(VIDEO_FILENAME) < 1000000:
+          if not video_downloaded:
               print("\n❌ Video download failed!")
               send_telegram_message("❌ فشل تحميل الفيديو")
               sys.exit(1)
@@ -544,7 +509,6 @@ jobs:
                   
                   ct = tempfile.mkdtemp(dir=TEMP_DIR)
                   try:
-                      # Cut
                       cp = os.path.join(ct, "c.mp4")
                       if not cut_clip(ss, es, cp):
                           print("   ❌ Cut failed")
@@ -552,7 +516,6 @@ jobs:
                           continue
                       print("   ✅ Cut: " + str(round(os.path.getsize(cp)/1024/1024, 1)) + " MB")
                       
-                      # Thumbnail & Merge
                       ip = os.path.join(ct, "t.png")
                       mp = cp
                       if create_thumbnail(title, ip):
@@ -561,14 +524,12 @@ jobs:
                               mp = mp2
                               print("   ✅ Merged: " + str(round(os.path.getsize(mp)/1024/1024, 1)) + " MB")
                       
-                      # Remove silence
                       fp = os.path.join(ct, "f.mp4")
                       if remove_silence(mp, fp):
                           print("   ✅ Silence removed: " + str(round(os.path.getsize(fp)/1024/1024, 1)) + " MB")
                       else:
                           fp = mp
                       
-                      # Send
                       cap = "**" + title + "**\n📌 " + str(idx+1) + "/" + str(total) + "\n⏱️ " + ss + "→" + es
                       
                       try:
@@ -584,7 +545,7 @@ jobs:
                                   try:
                                       await client.send_file(target, comp, caption=cap+"\n(مضغوط)", supports_streaming=True)
                                       sent += 1
-                                      print("   ✅ Sent compressed version!")
+                                      print("   ✅ Sent compressed!")
                                   except:
                                       failed += 1
                                       print("   ❌ Send failed")
