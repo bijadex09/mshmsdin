@@ -28,7 +28,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg fontconfig build-essential python3-dev
-          pip install yt-dlp requests Pillow webrtcvad-wheels
+          npm install -g sharp-cli
+          pip install yt-dlp requests webrtcvad-wheels
           pip install --upgrade pip
           pip install --upgrade yt-dlp
 
@@ -52,7 +53,6 @@ jobs:
           import threading
           import time
           from typing import List, Tuple
-          from PIL import Image, ImageDraw, ImageFont
 
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
           
@@ -71,15 +71,16 @@ jobs:
           # إعدادات الصور والخطوط (مأخوذة من الكود الأصلي)
           FONT_SYSTEM_DIR = os.path.expanduser("~/.local/share/fonts")
           IMAGES_CACHE_DIR = os.path.expanduser("~/.local/share/images")
-          FONT_FULL_PATH = os.path.join(FONT_SYSTEM_DIR, "ReadexPro-Bold.ttf")
-          
+          FONT_NAME = "ReadexPro-Bold.ttf"
+          FONT_FULL_PATH = os.path.join(FONT_SYSTEM_DIR, FONT_NAME)
+
           BACKGROUND_SHORT_URL = "https://raw.githubusercontent.com/bidjadraft/markdown/refs/heads/main/images/background1.png"
           BACKGROUND_LONG_URL = "https://raw.githubusercontent.com/bidjadraft/markdown/refs/heads/main/images/background.png"
           FONT_URL = "https://raw.githubusercontent.com/bidjadraft/markdown/refs/heads/main/fonts/ReadexPro-Bold.ttf"
 
           os.makedirs(IMAGES_CACHE_DIR, exist_ok=True)
           os.makedirs(FONT_SYSTEM_DIR, exist_ok=True)
-          
+
           CACHED_FONT = os.path.join(IMAGES_CACHE_DIR, "ReadexPro-Bold.ttf")
           CACHED_BG_SHORT = os.path.join(IMAGES_CACHE_DIR, "background1.png")
           CACHED_BG_LONG = os.path.join(IMAGES_CACHE_DIR, "background.png")
@@ -259,7 +260,7 @@ jobs:
                   output_path
               ])
 
-          # دالة إنشاء الصورة (مأخوذة من الكود الأصلي)
+          # دوال إنشاء الصور (مأخوذة بالكامل من الكود الأصلي)
           def get_single_line_font_size(word_count):
               if word_count <= 3:
                   return 90
@@ -295,24 +296,75 @@ jobs:
               else:
                   bg_to_use = bg_image
               
+              # استخدام SVG كما في الكود الأصلي
+              if not use_multiline:
+                  svg = f'''<?xml version="1.0" encoding="UTF-8"?>
+          <svg width="1080" height="1920" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                  <style>
+                      @font-face {{
+                          font-family: 'Readex Pro';
+                          src: url('{FONT_FULL_PATH}');
+                      }}
+                      .title {{
+                          fill: white;
+                          font-family: 'Readex Pro', sans-serif;
+                          font-size: {font_size}px;
+                          font-weight: bold;
+                          text-anchor: middle;
+                          filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.5));
+                      }}
+                  </style>
+              </defs>
+              <text x="540" y="1390" class="title" direction="rtl">{text}</text>
+          </svg>'''
+              else:
+                  lines = split_text_to_two_lines(text)
+                  svg = f'''<?xml version="1.0" encoding="UTF-8"?>
+          <svg width="1080" height="1920" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                  <style>
+                      @font-face {{
+                          font-family: 'Readex Pro';
+                          src: url('{FONT_FULL_PATH}');
+                      }}
+                      .title {{
+                          fill: white;
+                          font-family: 'Readex Pro', sans-serif;
+                          font-size: {font_size}px;
+                          font-weight: bold;
+                          text-anchor: middle;
+                          filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.5));
+                      }}
+                  </style>
+              </defs>
+              <text x="540" y="1390" class="title" direction="rtl">{lines[0]}</text>
+              <text x="540" y="1500" class="title" direction="rtl">{lines[1]}</text>
+          </svg>'''
+              
+              temp_svg = os.path.join(IMAGES_CACHE_DIR, "text_layer.svg")
+              with open(temp_svg, "w", encoding="utf-8") as f:
+                  f.write(svg)
+              
               try:
-                  from PIL import Image, ImageDraw, ImageFont
-                  img = Image.open(bg_to_use).convert("RGBA")
-                  draw = ImageDraw.Draw(img)
-                  font = ImageFont.truetype(FONT_FULL_PATH, font_size)
-                  
-                  if use_multiline:
-                      lines = split_text_to_two_lines(text)
-                      draw.text((540, 1390), lines[0], font=font, fill="white", anchor="mm")
-                      draw.text((540, 1500), lines[1], font=font, fill="white", anchor="mm")
-                  else:
-                      draw.text((540, 1390), text, font=font, fill="white", anchor="mm")
-                  
-                  img.convert("RGB").save(output_path, "PNG")
-                  return True
-              except Exception as e:
-                  print(f"Pillow failed: {e}")
-                  return False
+                  # محاولة استخدام sharp-cli كما في الكود الأصلي
+                  subprocess.run(['sharp', 'composite', temp_svg, '--input', bg_to_use, '--output', output_path], check=True, capture_output=True)
+              except:
+                  # fallback باستخدام ffmpeg كما في الكود الأصلي
+                  temp_text_png = os.path.join(IMAGES_CACHE_DIR, "temp_text.png")
+                  try:
+                      subprocess.run(['sharp', '-i', temp_svg, '-o', temp_text_png, '--density', '300'], check=True, capture_output=True)
+                      subprocess.run(['ffmpeg', '-y', '-i', bg_to_use, '-i', temp_text_png, '-filter_complex', 'overlay=0:0', '-frames:v', '1', output_path], check=True, capture_output=True)
+                  except:
+                      return False
+                  finally:
+                      if os.path.exists(temp_text_png):
+                          os.remove(temp_text_png)
+              
+              if os.path.exists(temp_svg):
+                  os.remove(temp_svg)
+              
+              return os.path.exists(output_path)
 
           # دالة دمج الفيديو مع الصورة (مأخوذة من الكود الأصلي)
           def process_tiktok_reel(video_path, image_path, output_path):
@@ -337,17 +389,27 @@ jobs:
               return run_cmd(cmd)
 
           # تحميل الأصول
+          def download_file(url, dest, name):
+              if os.path.exists(dest):
+                  return True
+              try:
+                  urllib.request.urlretrieve(url, dest)
+                  return True
+              except:
+                  return False
+
           try:
-              if not os.path.exists(CACHED_FONT): urllib.request.urlretrieve(FONT_URL, CACHED_FONT)
-              if not os.path.exists(CACHED_BG_SHORT): urllib.request.urlretrieve(BACKGROUND_SHORT_URL, CACHED_BG_SHORT)
-              if not os.path.exists(CACHED_BG_LONG): urllib.request.urlretrieve(BACKGROUND_LONG_URL, CACHED_BG_LONG)
+              if not os.path.exists(CACHED_FONT): 
+                  download_file(FONT_URL, CACHED_FONT, "font")
+              if not os.path.exists(CACHED_BG_SHORT): 
+                  download_file(BACKGROUND_SHORT_URL, CACHED_BG_SHORT, "background1")
+              if not os.path.exists(CACHED_BG_LONG): 
+                  download_file(BACKGROUND_LONG_URL, CACHED_BG_LONG, "background2")
               if not os.path.exists(FONT_FULL_PATH):
                   shutil.copy2(CACHED_FONT, FONT_FULL_PATH)
                   subprocess.run(['fc-cache', '-fv'], capture_output=True)
-          except Exception as e: print(f"⚠️ Assets setup warning: {e}")
-
-          # باقي الكود كما هو لتحميل الفيديو واستخراج النص وجيميناي...
-          # (تم الحفاظ على نفس الكود لتحميل الفيديو واستخراج النص)
+          except Exception as e: 
+              print(f"⚠️ Assets setup warning: {e}")
 
           if COOKIES_TEXT:
               with open(COOKIES_FILE, "w", encoding="utf-8") as f:
@@ -370,10 +432,12 @@ jobs:
           try:
               result = subprocess.run(command, capture_output=True, text=True)
               video_success = result.returncode == 0 and os.path.exists(TEMP_VIDEO)
-          except Exception as e: print(f"❌ Subprocess failed: {e}")
+          except Exception as e: 
+              print(f"❌ Subprocess failed: {e}")
 
           if not video_success:
-              if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
+              if os.path.exists(COOKIES_FILE): 
+                  os.remove(COOKIES_FILE)
               print("❌ Download failed!")
               tg_msg("❌ فشل تحميل الفيديو.")
               sys.exit(1)
@@ -402,9 +466,11 @@ jobs:
                   with open(FINAL_TRANSCRIPT, "w", encoding="utf-8") as f:
                       f.write('\n'.join(lines))
                   transcript_exists = True
-          except Exception as e: print(f"❌ VTT Extraction failed: {e}")
+          except Exception as e: 
+              print(f"❌ VTT Extraction failed: {e}")
 
-          if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
+          if os.path.exists(COOKIES_FILE): 
+              os.remove(COOKIES_FILE)
 
           if not transcript_exists:
               print("❌ Transcript not found!")
@@ -552,13 +618,13 @@ jobs:
               elif removed > 0:
                   print(f"  ✅ Removed {seconds_to_time(removed)} of silence")
               
-              # إنشاء الصورة
+              # إنشاء الصورة باستخدام SVG (نفس الكود الأصلي)
               print(f"  🖼️ Creating image...")
               if not create_image_with_title(clip['title'], img_path):
                   print(f"  ❌ Failed to create image")
                   continue
               
-              # دمج الفيديو مع الصورة
+              # دمج الفيديو مع الصورة (نفس الكود الأصلي)
               print(f"  🎬 Merging video with image...")
               if process_tiktok_reel(vad_clip, img_path, output_path) and os.path.exists(output_path):
                   size_mb = os.path.getsize(output_path) / (1024 * 1024)
