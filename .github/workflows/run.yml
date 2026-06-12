@@ -26,8 +26,6 @@ jobs:
       - name: Download Cookies
         run: |
           curl -sL "https://raw.githubusercontent.com/bijadex09/mshmsdin/main/cookies.txt" -o cookies.txt
-          echo "Cookies size: $(wc -c < cookies.txt) bytes"
-          echo "Cookies lines: $(wc -l < cookies.txt)"
 
       - name: Process Video
         env:
@@ -52,8 +50,14 @@ jobs:
           TG_TARGET = os.environ['TG_TARGET']
           VIDEO = 'video.mp4'
           COOKIES = 'cookies.txt'
-          SUBS = 'sub_file.ar.vtt'
           TMP = tempfile.mkdtemp()
+
+          def vid_id(u):
+              patterns = [r"youtu\.be/([^&?/]+)", r"youtube\.com/watch\?v=([^&?/]+)", r"youtube\.com/embed/([^&?/]+)", r"youtube\.com/live/([^&?/]+)"]
+              for pattern in patterns:
+                  match = re.search(pattern, u)
+                  if match: return match.group(1)
+              return None
 
           def t2s(t):
               p = list(map(int, t.strip().split(':')))
@@ -146,59 +150,56 @@ jobs:
               return os.path.isfile(out)
 
           async def run_pipeline():
-              print("\n📥 Downloading Subtitles via yt-dlp Bypass...")
-              # تخطي الـ Challenge بتغيير الـ player_client إلى خدمات الهواتف والشاشات الذكية
-              sub_opts = {
-                  'skip_download': True,
+              print("\n📥 Extracting any available transcript natively using yt-dlp...")
+              
+              # جلب أي لغة متوفرة عبر وضع 'all' لضمان تحميل الترجمة الأساسية للمقطع
+              ydl_opts = {
+                  'writesubtitles': True,
                   'writeautomaticsub': True,
-                  'subtitleslangs': ['ar'],
-                  'outtmpl': 'sub_file',
+                  'subtitleslangs': ['all'],
+                  'skip_download': True,
+                  'outtmpl': os.path.join(TMP, 'sub.%(lang)s'),
                   'cookiefile': COOKIES if os.path.exists(COOKIES) else None,
-                  'quiet': True,
-                  'extractor_args': {'youtube': {'player_client': ['android', 'tv', 'web']}}
+                  'quiet': True
               }
+              
               try:
-                  with yt_dlp.YoutubeDL(sub_opts) as ydl:
+                  with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                       ydl.download([YT_URL])
               except Exception as e:
-                  print(f"Subtitles download error: {e}")
-
-              if not os.path.isfile(SUBS):
-                  print("❌ Subtitle file not found!")
-                  await tg_msg("❌ فشل استخراج ملف الترجمة من الفيديو بسبب قيود يوتيوب الجديدة")
-                  sys.exit(1)
-
+                  print(f"⚠️ yt-dlp caption download failed: {e}")
+                  
+              # البحث عن أول ملف ترجمة تم تحميله بنجاح بأي لغة كانت
+              sub_files = glob.glob(os.path.join(TMP, 'sub.*'))
               lines = []
-              try:
-                  for caption in webvtt.read(SUBS):
-                      t_start = caption.start.split('.')[0]
-                      clean_txt = " ".join([ln.strip() for ln in caption.text.split('\n') if ln.strip()])
-                      clean_txt = re.sub(r'<[^>]*>', '', clean_txt)
-                      if clean_txt:
-                          lines.append(f"{t_start} | {clean_txt}")
-              except Exception as e:
-                  print(f"VTT Parsing Error: {e}")
-                  sys.exit(1)
-
-              final_lines = []
-              last_line = ""
-              for ln in lines:
-                  if ln != last_line:
-                      final_lines.append(ln)
-                      last_line = ln
-
-              transcript = '\n'.join(final_lines)
-              print(f"✅ Got {len(final_lines)} lines of transcript")
-
+              
+              if sub_files:
+                  # تصفية الملفات للتأكد من أنها ملفات نصية صالحة للقراءة
+                  valid_subs = [f for f in sub_files if not f.endswith('.json') and os.path.isfile(f)]
+                  if valid_subs:
+                      chosen_sub = valid_subs[0]
+                      print(f"✅ Found and using subtitle file: {chosen_sub}")
+                      try:
+                          for caption in webvtt.read(chosen_sub):
+                              start_time = caption.start.split('.')[0]
+                              text_clean = caption.text.replace('\n', ' ').strip()
+                              if text_clean and (not lines or text_clean != lines[-1].split(' | ')[-1]):
+                                  lines.append(f"{start_time} | {text_clean}")
+                      except Exception as e:
+                          print(f"❌ Error parsing subtitle file: {e}")
+              
+              transcript = '\n'.join(lines)
               if not transcript.strip():
-                  print("❌ Transcript is empty!")
-                  await tg_msg("❌ نص الترجمة فارغ أو لم ينجح تنظيفه")
+                  print("❌ Could not extract any text transcript from this video.")
+                  await tg_msg("❌ فشل استخراج النص التلقائي للفيديو المختار (لا توجد أي ترجمة متوفرة بملف الفيديو)")
                   sys.exit(1)
+
+              print(f"✅ Processed {len(lines)} formatted lines natively from available language.")
 
               # ============== STEP 2: Gemini Analysis ==============
               print("\n🤖 Analyzing with Gemini...")
-              prompt = f"""حلل النص واستخرج المواضيع الرئيسية مع أوقاتها:
-              • HH:MM:SS | عنوان الموضوع
+              prompt = f"""حلل النص واستخرج المواضيع الرئيسية مع أوقاتها (اكتب عناوين المواضيع باللغة العربية دائماً):
+              • HH:MM:SS | عنوان الموضوع باللغة العربية
 
               النص:
               {transcript[:50000]}"""
@@ -225,29 +226,19 @@ jobs:
               print("\n📥 Downloading video...")
               await tg_msg(f"✅ تم تحليل {len(segments)} مقطع\n📥 جاري تحميل الفيديو...")
 
-              # تطبيق نفس الالتفاف البرمجي لتجاوز حظر صيغ تحميل الفيديو
-              v_opts = {
-                  'format': 'best[height<=720]/best', 
-                  'outtmpl': VIDEO, 
-                  'quiet': True,
-                  'cookiefile': COOKIES if os.path.exists(COOKIES) else None, 
-                  'live_from_start': True,
-                  'extractor_args': {'youtube': {'player_client': ['android', 'tv', 'web']}}
-              }
+              opts = {'format': 'best[height<=720]/best', 'outtmpl': VIDEO, 'quiet': True,
+                      'cookiefile': COOKIES if os.path.exists(COOKIES) else None, 'live_from_start': True}
               try:
-                  with yt_dlp.YoutubeDL(v_opts) as ydl:
+                  with yt_dlp.YoutubeDL(opts) as ydl:
                       ydl.download([YT_URL])
               except:
-                  v_opts['cookiefile'] = None
-                  with yt_dlp.YoutubeDL(v_opts) as ydl:
+                  opts['cookiefile'] = None
+                  with yt_dlp.YoutubeDL(opts) as ydl:
                       ydl.download([YT_URL])
 
               if not os.path.isfile(VIDEO):
                   print("❌ Download failed!")
                   sys.exit(1)
-
-              vsize = os.path.getsize(VIDEO)/1024/1024
-              print(f"✅ Downloaded: {vsize:.1f} MB")
 
               # ============== STEP 4: Process & Send Clips ==============
               print(f"\n🎬 Processing {len(segments)} clips...")
@@ -266,7 +257,6 @@ jobs:
                   
                   ss_str, es_str = ts, s2t(end_sec)
                   dur_min = (end_sec - start_sec) / 60
-                  print(f"\n📹 {idx+1}/{len(segments)}: {title[:60]} ({dur_min:.1f}m)")
                   
                   td = tempfile.mkdtemp(dir=TMP)
                   try:
@@ -318,7 +308,7 @@ jobs:
 
           asyncio.run(run_pipeline())
 
-          for f in [VIDEO, SUBS, COOKIES]:
-              if os.path.isfile(f): os.remove(f)
+          if os.path.exists(VIDEO): os.remove(VIDEO)
+          if os.path.exists(COOKIES): os.remove(COOKIES)
           shutil.rmtree(TMP, ignore_errors=True)
           print("\n✅ All done!")
