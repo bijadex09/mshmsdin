@@ -52,6 +52,7 @@ jobs:
           import urllib.request
           from PIL import Image, ImageDraw, ImageFont
           from telethon import TelegramClient
+          from telethon.sessions import StringSession
 
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
           API_ID = 26585141
@@ -92,7 +93,8 @@ jobs:
 
           async def tg_send_video_telethon(filepath, caption):
               try:
-                  async with TelegramClient('bot_session', API_ID, API_HASH) as client:
+                  # استخدام StringSession فارغ مع توكن البوت مباشرة
+                  async with TelegramClient(StringSession(), API_ID, API_HASH) as client:
                       await client.start(bot_token=BOT_TOKEN)
                       await client.send_file(int(TG_TARGET), filepath, caption=caption, supports_streaming=True)
                       return True
