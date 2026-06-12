@@ -16,7 +16,12 @@ jobs:
   process:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup
+      - name: Setup Node.js (For yt-dlp JavaScript challenge solver)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup System Dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
@@ -150,9 +155,8 @@ jobs:
               return os.path.isfile(out)
 
           async def run_pipeline():
-              print("\n📥 Extracting any available transcript natively using yt-dlp...")
+              print("\n📥 Extracting available transcript natively using yt-dlp...")
               
-              # جلب أي لغة متوفرة عبر وضع 'all' لضمان تحميل الترجمة الأساسية للمقطع
               ydl_opts = {
                   'writesubtitles': True,
                   'writeautomaticsub': True,
@@ -160,6 +164,7 @@ jobs:
                   'skip_download': True,
                   'outtmpl': os.path.join(TMP, 'sub.%(lang)s'),
                   'cookiefile': COOKIES if os.path.exists(COOKIES) else None,
+                  'ignoreerrors': True,
                   'quiet': True
               }
               
@@ -167,14 +172,12 @@ jobs:
                   with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                       ydl.download([YT_URL])
               except Exception as e:
-                  print(f"⚠️ yt-dlp caption download failed: {e}")
+                  print(f"⚠️ yt-dlp caption download status: {e}")
                   
-              # البحث عن أول ملف ترجمة تم تحميله بنجاح بأي لغة كانت
               sub_files = glob.glob(os.path.join(TMP, 'sub.*'))
               lines = []
               
               if sub_files:
-                  # تصفية الملفات للتأكد من أنها ملفات نصية صالحة للقراءة
                   valid_subs = [f for f in sub_files if not f.endswith('.json') and os.path.isfile(f)]
                   if valid_subs:
                       chosen_sub = valid_subs[0]
@@ -194,7 +197,7 @@ jobs:
                   await tg_msg("❌ فشل استخراج النص التلقائي للفيديو المختار (لا توجد أي ترجمة متوفرة بملف الفيديو)")
                   sys.exit(1)
 
-              print(f"✅ Processed {len(lines)} formatted lines natively from available language.")
+              print(f"✅ Processed {len(lines)} formatted lines natively.")
 
               # ============== STEP 2: Gemini Analysis ==============
               print("\n🤖 Analyzing with Gemini...")
@@ -226,8 +229,15 @@ jobs:
               print("\n📥 Downloading video...")
               await tg_msg(f"✅ تم تحليل {len(segments)} مقطع\n📥 جاري تحميل الفيديو...")
 
-              opts = {'format': 'best[height<=720]/best', 'outtmpl': VIDEO, 'quiet': True,
-                      'cookiefile': COOKIES if os.path.exists(COOKIES) else None, 'live_from_start': True}
+              # تم تحسين خيار الصيغة 'b' لضمان تحميل أي صيغة فيديو متاحة ومطابقة دون شروط معقدة
+              opts = {
+                  'format': 'b/best/bestvideo+bestaudio', 
+                  'outtmpl': VIDEO, 
+                  'quiet': True,
+                  'cookiefile': COOKIES if os.path.exists(COOKIES) else None, 
+                  'live_from_start': True,
+                  'ignoreerrors': True
+              }
               try:
                   with yt_dlp.YoutubeDL(opts) as ydl:
                       ydl.download([YT_URL])
