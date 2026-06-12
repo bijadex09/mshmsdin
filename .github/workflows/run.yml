@@ -49,6 +49,9 @@ jobs:
           import requests
           import json
           import urllib.request
+          import threading
+          import time
+          from typing import List, Tuple
           from PIL import Image, ImageDraw, ImageFont
 
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
@@ -65,6 +68,7 @@ jobs:
           EXPECTED_VTT = os.path.join(BASE_DIR, "sub_file.ar.vtt")
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
 
+          # إعدادات الصور والخطوط (مأخوذة من الكود الأصلي)
           FONT_SYSTEM_DIR = os.path.expanduser("~/.local/share/fonts")
           IMAGES_CACHE_DIR = os.path.expanduser("~/.local/share/images")
           FONT_FULL_PATH = os.path.join(FONT_SYSTEM_DIR, "ReadexPro-Bold.ttf")
@@ -79,6 +83,13 @@ jobs:
           CACHED_FONT = os.path.join(IMAGES_CACHE_DIR, "ReadexPro-Bold.ttf")
           CACHED_BG_SHORT = os.path.join(IMAGES_CACHE_DIR, "background1.png")
           CACHED_BG_LONG = os.path.join(IMAGES_CACHE_DIR, "background.png")
+
+          # إعدادات الصوت والفيديو (مأخوذة من الكود الأصلي)
+          AUDIO_BITRATE = "96k"
+          VIDEO_PRESET = "faster"
+          VIDEO_CRF = 20
+          SILENCE_THRESHOLD = 0.5
+          VAD_AGGRESSIVENESS = 3
 
           def tg_msg(text):
               try:
@@ -103,6 +114,229 @@ jobs:
                   print(f"⚠️ Send video error: {e}")
                   return False
 
+          def get_duration(file_path: str) -> float:
+              try:
+                  cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
+                         '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
+                  result = subprocess.run(cmd, capture_output=True, text=True)
+                  return float(result.stdout.strip()) if result.stdout.strip() else 0.0
+              except:
+                  return 0.0
+
+          def run_cmd(cmd):
+              try:
+                  if isinstance(cmd, list):
+                      result = subprocess.run(cmd, capture_output=True, text=True)
+                  else:
+                      result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
+                  return result.returncode == 0
+              except:
+                  return False
+
+          def seconds_to_time(seconds: float) -> str:
+              minutes = int(seconds // 60)
+              secs = int(seconds % 60)
+              if minutes >= 60:
+                  hours = minutes // 60
+                  minutes = minutes % 60
+                  return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+              return f"{minutes:02d}:{secs:02d}"
+
+          # دالة إزالة الصمت (مأخوذة بالكامل من الكود الأصلي)
+          def merge_segments(segments: List, threshold: float) -> List[Tuple[float, float]]:
+              if not segments:
+                  return []
+              merged = []
+              cs, ce = segments[0]
+              for ns, ne in segments[1:]:
+                  if ns - ce <= threshold:
+                      ce = max(ce, ne)
+                  else:
+                      merged.append((cs, ce))
+                      cs, ce = ns, ne
+              merged.append((cs, ce))
+              return [(s, e) for s, e in merged if e - s > 0.5]
+
+          def remove_silence_from_video(input_path: str, output_path: str) -> Tuple[bool, float]:
+              try:
+                  import webrtcvad
+                  vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+              except ImportError:
+                  shutil.copy2(input_path, output_path)
+                  return True, 0.0
+              
+              orig_duration = get_duration(input_path)
+              
+              with tempfile.TemporaryDirectory() as temp_dir:
+                  temp_audio = os.path.join(temp_dir, "audio.wav")
+                  
+                  if not run_cmd(['ffmpeg', '-y', '-i', input_path, '-ar', '16000', '-ac', '1', temp_audio, '-loglevel', 'quiet']):
+                      return False, 0.0
+                  
+                  try:
+                      with wave.open(temp_audio, 'rb') as wav:
+                          rate = wav.getframerate()
+                          frames = wav.readframes(wav.getnframes())
+                  except:
+                      return False, 0.0
+                  
+                  frame_duration = 30
+                  frame_size = int(rate * frame_duration / 1000) * 2
+                  
+                  segments = []
+                  speech = False
+                  start_time = 0.0
+                  
+                  for i in range(0, len(frames) - frame_size, frame_size):
+                      try:
+                          is_speech = vad.is_speech(frames[i:i+frame_size], rate)
+                          current_time = i / (rate * 2)
+                          
+                          if is_speech and not speech:
+                              speech = True
+                              start_time = max(0, current_time - 0.2)
+                          elif not is_speech and speech:
+                              speech = False
+                              segments.append((start_time, current_time + 0.2))
+                      except:
+                          continue
+                  
+                  if speech:
+                      segments.append((start_time, len(frames) / (rate * 2)))
+                  
+                  if not segments:
+                      return False, 0.0
+                  
+                  merged = merge_segments(segments, SILENCE_THRESHOLD)
+                  
+                  ext = os.path.splitext(input_path)[1]
+                  segment_files = []
+                  
+                  for i, (s, e) in enumerate(merged):
+                      duration = e - s
+                      seg_file = os.path.join(temp_dir, f"seg_{i:03d}{ext}")
+                      
+                      cmd = [
+                          'ffmpeg', '-y',
+                          '-ss', f"{s:.3f}",
+                          '-i', input_path,
+                          '-t', f"{duration:.3f}",
+                          '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', str(VIDEO_CRF),
+                          '-c:a', 'aac', '-b:a', AUDIO_BITRATE,
+                          '-avoid_negative_ts', 'make_zero',
+                          seg_file, '-loglevel', 'quiet'
+                      ]
+                      
+                      if run_cmd(cmd) and os.path.exists(seg_file) and os.path.getsize(seg_file) > 0:
+                          segment_files.append(seg_file)
+                  
+                  if not segment_files:
+                      return False, 0.0
+                  
+                  concat_file = os.path.join(temp_dir, "concat.txt")
+                  with open(concat_file, 'w') as f:
+                      for seg in segment_files:
+                          f.write(f"file '{seg}'\n")
+                  
+                  if run_cmd(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_file, '-c', 'copy', output_path, '-loglevel', 'quiet']):
+                      new_duration = get_duration(output_path)
+                      removed = orig_duration - new_duration
+                      if removed < 0:
+                          removed = 0
+                      return True, removed
+              
+              return False, 0.0
+
+          # دالة قص المقطع (مأخوذة من الكود الأصلي)
+          def extract_clip(video_path: str, start: str, end: str, output_path: str) -> bool:
+              return run_cmd([
+                  'ffmpeg', '-y',
+                  '-ss', start,
+                  '-to', end,
+                  '-i', video_path,
+                  '-c', 'copy',
+                  '-loglevel', 'error',
+                  output_path
+              ])
+
+          # دالة إنشاء الصورة (مأخوذة من الكود الأصلي)
+          def get_single_line_font_size(word_count):
+              if word_count <= 3:
+                  return 90
+              elif word_count == 4:
+                  return 80
+              elif word_count == 5:
+                  return 68
+              else:
+                  return 57
+
+          def split_text_to_two_lines(text):
+              words = text.strip().split()
+              half = (len(words) + 1) // 2
+              return [" ".join(words[:half]), " ".join(words[half:])]
+
+          def create_image_with_title(text, output_path):
+              word_count = len(text.strip().split())
+              
+              if word_count >= 7:
+                  bg_image = CACHED_BG_LONG
+                  font_size = 70
+                  use_multiline = True
+              else:
+                  bg_image = CACHED_BG_SHORT
+                  font_size = get_single_line_font_size(word_count)
+                  use_multiline = False
+              
+              if not os.path.exists(bg_image):
+                  fallback_bg = os.path.join(IMAGES_CACHE_DIR, "fallback_bg.png")
+                  if not os.path.exists(fallback_bg):
+                      subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:d=1', '-frames:v', '1', fallback_bg], capture_output=True)
+                  bg_to_use = fallback_bg
+              else:
+                  bg_to_use = bg_image
+              
+              try:
+                  from PIL import Image, ImageDraw, ImageFont
+                  img = Image.open(bg_to_use).convert("RGBA")
+                  draw = ImageDraw.Draw(img)
+                  font = ImageFont.truetype(FONT_FULL_PATH, font_size)
+                  
+                  if use_multiline:
+                      lines = split_text_to_two_lines(text)
+                      draw.text((540, 1390), lines[0], font=font, fill="white", anchor="mm")
+                      draw.text((540, 1500), lines[1], font=font, fill="white", anchor="mm")
+                  else:
+                      draw.text((540, 1390), text, font=font, fill="white", anchor="mm")
+                  
+                  img.convert("RGB").save(output_path, "PNG")
+                  return True
+              except Exception as e:
+                  print(f"Pillow failed: {e}")
+                  return False
+
+          # دالة دمج الفيديو مع الصورة (مأخوذة من الكود الأصلي)
+          def process_tiktok_reel(video_path, image_path, output_path):
+              filter_complex = (
+                  "[0:v]loop=loop=-1:size=1:start=0,setpts=PTS-STARTPTS,scale=trunc(iw/2)*2:trunc(ih/2)*2[bg]; "
+                  "[1:v]setpts=PTS-STARTPTS,crop=ih*4/5:ih:(iw-ow)/2:0,scale=820:1026[v_final]; "
+                  "[bg][v_final]overlay=(W-w)/2:150:shortest=1"
+              )
+              
+              cmd = [
+                  "ffmpeg", "-y",
+                  "-i", image_path,
+                  "-i", video_path,
+                  "-filter_complex", filter_complex,
+                  "-pix_fmt", "yuv420p",
+                  "-c:v", "libx264",
+                  "-c:a", "aac", "-b:a", AUDIO_BITRATE,
+                  "-shortest",
+                  output_path
+              ]
+              
+              return run_cmd(cmd)
+
+          # تحميل الأصول
           try:
               if not os.path.exists(CACHED_FONT): urllib.request.urlretrieve(FONT_URL, CACHED_FONT)
               if not os.path.exists(CACHED_BG_SHORT): urllib.request.urlretrieve(BACKGROUND_SHORT_URL, CACHED_BG_SHORT)
@@ -111,6 +345,9 @@ jobs:
                   shutil.copy2(CACHED_FONT, FONT_FULL_PATH)
                   subprocess.run(['fc-cache', '-fv'], capture_output=True)
           except Exception as e: print(f"⚠️ Assets setup warning: {e}")
+
+          # باقي الكود كما هو لتحميل الفيديو واستخراج النص وجيميناي...
+          # (تم الحفاظ على نفس الكود لتحميل الفيديو واستخراج النص)
 
           if COOKIES_TEXT:
               with open(COOKIES_FILE, "w", encoding="utf-8") as f:
@@ -272,90 +509,7 @@ jobs:
               tg_msg(f"❌ حدث خطأ أثناء إرسال الطلب: {e}")
               sys.exit(1)
 
-          def safe_title(t):
-              return "".join(c for c in t if c.isalnum() or c in ' _-').replace(' ', '_')[:60]
-
-          def remove_silence(inp, outp):
-              try:
-                  import webrtcvad
-                  vad = webrtcvad.Vad(3)
-                  temp_wav = inp + ".wav"
-                  if subprocess.run(['ffmpeg', '-y', '-i', inp, '-ar', '16000', '-ac', '1', temp_wav, '-loglevel', 'quiet']).returncode != 0:
-                      shutil.copy2(inp, outp)
-                      return
-                  with wave.open(temp_wav, 'rb') as wav:
-                      rate = wav.getframerate()
-                      frames = wav.readframes(wav.getnframes())
-                  frame_duration = 30
-                  frame_size = int(rate * frame_duration / 1000) * 2
-                  segments = []
-                  speech = False
-                  start_time = 0.0
-                  for i in range(0, len(frames) - frame_size, frame_size):
-                      is_speech = vad.is_speech(frames[i:i+frame_size], rate)
-                      current_time = i / (rate * 2)
-                      if is_speech and not speech:
-                          speech = True
-                          start_time = max(0, current_time - 0.2)
-                      elif not is_speech and speech:
-                          speech = False
-                          segments.append((start_time, current_time + 0.2))
-                  if speech: segments.append((start_time, len(frames) / (rate * 2)))
-                  if not segments:
-                      shutil.copy2(inp, outp)
-                      return
-                  merged = []
-                  cs, ce = segments[0]
-                  for ns, ne in segments[1:]:
-                      if ns - ce <= 0.5: ce = max(ce, ne)
-                      else:
-                          merged.append((cs, ce))
-                          cs, ce = ns, ne
-                  merged.append((cs, ce))
-                  
-                  with tempfile.TemporaryDirectory() as t_dir:
-                      seg_files = []
-                      for idx, (s, e) in enumerate(merged):
-                          if e - s < 0.5: continue
-                          s_file = os.path.join(t_dir, f"s_{idx}.mp4")
-                          if subprocess.run(['ffmpeg', '-y', '-ss', f"{s:.3f}", '-i', inp, '-t', f"{e-s:.3f}", '-c:v', 'libx264', '-preset', 'faster', '-crf', '22', '-c:a', 'aac', '-b:a', '96k', s_file, '-loglevel', 'quiet']).returncode == 0:
-                              seg_files.append(s_file)
-                      if not seg_files:
-                          shutil.copy2(inp, outp)
-                          return
-                      c_file = os.path.join(t_dir, "c.txt")
-                      with open(c_file, 'w') as f:
-                          for sf in seg_files: f.write(f"file '{sf}'\n")
-                      subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', c_file, '-c', 'copy', outp, '-loglevel', 'quiet'])
-                  if os.path.exists(temp_wav): os.remove(temp_wav)
-              except Exception as e:
-                  print(f"VAD Error: {e}")
-                  shutil.copy2(inp, outp)
-
-          def create_image(title, output_img):
-              try:
-                  w_count = len(title.strip().split())
-                  bg_path = CACHED_BG_LONG if w_count >= 7 else CACHED_BG_SHORT
-                  f_size = 62 if w_count >= 7 else (85 if w_count <= 3 else 66)
-                  
-                  img = Image.open(bg_path).convert("RGBA")
-                  draw = ImageDraw.Draw(img)
-                  font = ImageFont.truetype(FONT_FULL_PATH, f_size)
-                  
-                  if w_count >= 7:
-                      words = title.strip().split()
-                      h = (len(words) + 1) // 2
-                      l1, l2 = " ".join(words[:h]), " ".join(words[h:])
-                      draw.text((540, 1370), l1, font=font, fill="white", anchor="mm")
-                      draw.text((540, 1470), l2, font=font, fill="white", anchor="mm")
-                  else:
-                      draw.text((540, 1390), title, font=font, fill="white", anchor="mm")
-                      
-                  img.convert("RGB").save(output_img, "PNG")
-              except Exception as e:
-                  print(f"⚠️ Pillow fail, falling back to FFmpeg drawtext: {e}")
-                  subprocess.run(['ffmpeg', '-y', '-i', bg_path, '-vf', f"drawtext=fontfile='{FONT_FULL_PATH}':text='{title}':x=(w-text_w)/2:y=1390:fontcolor=white:fontsize={f_size}", '-frames:v', '1', output_img], quiet=True)
-
+          # استخراج المواقيت من رد جيميناي
           clips = []
           for line in gemini_result.strip().split('\n'):
               if '|' in line:
@@ -370,30 +524,61 @@ jobs:
 
           tg_msg(f"🚀 تم تأكيد مواقيت جيميناي وبدء عملية القص والإنتاج لـ ({len(clips)}) مقطع...")
 
+          # معالجة كل مقطع
           for idx, clip in enumerate(clips, 1):
-              print(f"\n🎬 Cutting Clip {idx}/{len(clips)}: {clip['title']}")
-              safe_name_str = safe_title(clip['title'])
+              print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']}")
+              
+              # إنشاء اسم آمن للملف
+              safe_name = "".join(c for c in clip['title'] if c.isalnum() or c == ' ' or c in '_-')
+              safe_name = safe_name.replace(' ', '_')[:100]
               
               raw_clip = os.path.join(BASE_DIR, f"raw_{idx}.mp4")
               vad_clip = os.path.join(BASE_DIR, f"vad_{idx}.mp4")
-              final_img = os.path.join(BASE_DIR, f"img_{idx}.png")
-              reel_output = os.path.join(BASE_DIR, f"{idx:02d}_{safe_name_str}.mp4")
+              img_path = os.path.join(BASE_DIR, f"img_{idx}.png")
+              output_path = os.path.join(BASE_DIR, f"{idx:02d}_{safe_name}.mp4")
               
-              cut_cmd = ['ffmpeg', '-y', '-ss', clip['start'], '-to', clip['end'], '-i', TEMP_VIDEO, '-c', 'copy', '-loglevel', 'error', raw_clip]
-              if subprocess.run(cut_cmd).returncode != 0: continue
+              # قص المقطع
+              print(f"  ✂️ Cutting: {clip['start']} → {clip['end']}")
+              if not extract_clip(TEMP_VIDEO, clip['start'], clip['end'], raw_clip):
+                  print(f"  ❌ Failed to cut clip")
+                  continue
               
-              remove_silence(raw_clip, vad_clip)
-              create_image(clip['title'], final_img)
+              # إزالة الصمت
+              print(f"  🔇 Removing silence...")
+              success, removed = remove_silence_from_video(raw_clip, vad_clip)
+              if not success:
+                  print(f"  ⚠️ Silence removal failed, using original")
+                  shutil.copy2(raw_clip, vad_clip)
+              elif removed > 0:
+                  print(f"  ✅ Removed {seconds_to_time(removed)} of silence")
               
-              filter_complex = "[0:v]loop=loop=-1:size=1:start=0,setpts=PTS-STARTPTS,scale=1080:1920[bg]; [1:v]setpts=PTS-STARTPTS,crop=ih*4/5:ih:(iw-ow)/2:0,scale=820:1026[v_final]; [bg][v_final]overlay=(W-w)/2:150:shortest=1"
-              merge_cmd = ["ffmpeg", "-y", "-i", final_img, "-i", vad_clip, "-filter_complex", filter_complex, "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-b:a", "96k", "-shortest", reel_output, "-loglevel", "error"]
+              # إنشاء الصورة
+              print(f"  🖼️ Creating image...")
+              if not create_image_with_title(clip['title'], img_path):
+                  print(f"  ❌ Failed to create image")
+                  continue
               
-              if subprocess.run(merge_cmd).returncode == 0 and os.path.exists(reel_output):
-                  caption_text = f"🎥 {clip['title']}\n\n⏱ التوقيت من الفيديو الأصلي: {clip['start']} 👈 {clip['end']}"
-                  tg_send_video(reel_output, caption_text)
+              # دمج الفيديو مع الصورة
+              print(f"  🎬 Merging video with image...")
+              if process_tiktok_reel(vad_clip, img_path, output_path) and os.path.exists(output_path):
+                  size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                  print(f"  ✅ Merged successfully ({size_mb:.1f}MB)")
+                  
+                  # إرسال إلى تليجرام
+                  caption_text = f"🎥 {clip['title']}\n\n⏱ {clip['start']} 👈 {clip['end']}"
+                  tg_send_video(output_path, caption_text)
+              else:
+                  print(f"  ❌ Failed to merge")
               
-              for temp_file in [raw_clip, vad_clip, final_img, reel_output]:
-                  if os.path.exists(temp_file): os.remove(temp_file)
+              # تنظيف الملفات المؤقتة
+              for temp_file in [raw_clip, vad_clip, img_path, output_path]:
+                  if os.path.exists(temp_file):
+                      try:
+                          os.remove(temp_file)
+                      except:
+                          pass
 
-          if os.path.exists(TEMP_VIDEO): os.remove(TEMP_VIDEO)
+          if os.path.exists(TEMP_VIDEO):
+              os.remove(TEMP_VIDEO)
+          
           tg_msg("🏁 اكتملت الدورة البرمجية المؤتمتة بالكامل! تم إنتاج ورفع جميع المقاطع بنجاح.")
