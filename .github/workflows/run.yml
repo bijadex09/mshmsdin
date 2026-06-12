@@ -1,4 +1,4 @@
-name: YouTube Video & Transcript Downloader
+name: YouTube Video & VTT Transcript Downloader
 
 on:
   workflow_dispatch:
@@ -38,8 +38,6 @@ jobs:
         run: |
           import os
           import sys
-          import re
-          import json
           import subprocess
           import requests
 
@@ -51,7 +49,8 @@ jobs:
           BASE_DIR = os.path.dirname(os.path.abspath(__file__))
           TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
           COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
-          TRANSCRIPT_FILE = os.path.join(BASE_DIR, "transcript.txt")
+          SUB_OUTPUT = os.path.join(BASE_DIR, "sub_file")
+          EXPECTED_VTT = os.path.join(BASE_DIR, "sub_file.ar.vtt")
 
           def tg_msg(text):
               try:
@@ -77,7 +76,7 @@ jobs:
           ]
           
           print("\n📥 Downloading video...")
-          tg_msg("📥 جاري تحميل الفيديو أولاً...")
+          tg_msg("📥 jari تحميل الفيديو أولاً...")
           
           video_success = False
           try:
@@ -95,54 +94,44 @@ jobs:
           size_mb = os.path.getsize(TEMP_VIDEO) / (1024 * 1024)
           print(f"✅ Download successful! File size: {size_mb:.2f} MB")
 
-          # 3. خطوة استخراج الترجمة وحفظها عبر yt-dlp (لتجنب أخطاء المكتبة الخرجية)
-          print("\n📜 Extracting transcript via yt-dlp...")
+          # 3. خطوة استخراج الترجمة باستخدام الأمر الخاص بك تماماً ومطابقة صيغة VTT
+          print("\n📜 Extracting transcript via your VTT method...")
           srt_command = [
-              "yt-dlp", "--cookies", COOKIES_FILE, "--skip-download",
-              "--write-auto-subs", "--write-subs", "--sub-lang", "ar,en",
-              "--sub-format", "json3", "-o", os.path.join(BASE_DIR, "sub"), YT_URL
+              "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
+              "--remote-components", "ejs:github", "--skip-download",
+              "--write-auto-sub", "--sub-lang", "ar", "--output", SUB_OUTPUT, YT_URL
           ]
           
-          lines = []
           try:
               subprocess.run(srt_command, capture_output=True, text=True)
               
-              # البحث عن ملف الترجمة المكتوب بصيغة json3
-              sub_files = [f for f in os.listdir(BASE_DIR) if f.endswith('.json3')]
-              
-              if sub_files:
-                  sub_path = os.path.join(BASE_DIR, sub_files[0])
-                  with open(sub_path, 'r', encoding='utf-8') as f:
-                      data = json.load(f)
+              if os.path.exists(EXPECTED_VTT):
+                  # قراءة ملف الـ VTT وتحويله لملف نصي منسق ومبسط
+                  with open(EXPECTED_VTT, "r", encoding="utf-8") as vtt_f:
+                      vtt_content = vtt_f.read()
                   
-                  for event in data.get('events', []):
-                      if 'segs' in event and 'tStartMs' in event:
-                          seconds = event['tStartMs'] / 1000.0
-                          h = int(seconds // 3600)
-                          m = int((seconds % 3600) // 60)
-                          s = int(seconds % 60)
-                          t_str = f"{h:02d}:{m:02d}:{s:02d}"
-                          
-                          txt = "".join([seg['utf8'] for seg in event['segs'] if 'utf8' in seg]).strip()
-                          txt = txt.replace('\n', ' ').strip()
-                          if txt and txt not in ['[موسيقى]', '[Music]']:
-                              lines.append(f"{t_str} | {txt}")
+                  # معالجة تنظيف نص VTT لاستخلاص الأسطر الهامة فقط
+                  lines = []
+                  for line in vtt_content.split('\n'):
+                      line = line.strip()
+                      if line and not line.startswith('WEBVTT') and not line.startswith('Kind:') and not line.startswith('Language:') and '-->' not in line:
+                          # منع التكرار العشوائي في ملفات VTT التلقائية
+                          if not lines or lines[-1] != line:
+                              lines.append(line)
                   
-                  # حفظ الملف النهائي مرتباً
-                  with open(TRANSCRIPT_FILE, "w", encoding="utf-8") as f:
+                  # حفظ النص النهائي المنسق
+                  FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
+                  with open(FINAL_TRANSCRIPT, "w", encoding="utf-8") as f:
                       f.write('\n'.join(lines))
                   
-                  print(f"✅ Transcript saved successfully! Total lines: {len(lines)}")
-                  tg_msg(f"✅ تم تحميل الفيديو بنجاح ({size_mb:.2f} MB).\n📜 تم استخراج الترجمة عبر yt-dlp بنجاح ({len(lines)} سطر).\n\nبانتظار توجيهاتك القادمة...")
-                  
-                  # تنظيف ملفات الترجمة المؤقتة
-                  if os.path.exists(sub_path): os.remove(sub_path)
+                  print(f"✅ VTT Transcript saved successfully! Total lines: {len(lines)}")
+                  tg_msg(f"✅ تم تحميل الفيديو بنجاح ({size_mb:.2f} MB).\n📜 تم استخراج الترجمة بنجاح بصيغة VTT وحفظها.\n\nبانتظار توجيهاتك القادمة...")
               else:
-                  raise FileNotFoundError("No json3 subtitle file found")
+                  raise FileNotFoundError("Expected VTT subtitle file was not created")
                   
           except Exception as e:
-              print(f"❌ Transcript extraction failed: {e}")
-              tg_msg(f"✅ تم تحميل الفيديو بنجاح ({size_mb:.2f} MB).\n⚠️ تنبيه: لم يتم العثور على ملف ترجمة تلقائية متوفر لهذا الفيديو على السيرفر.")
+              print(f"❌ VTT Extraction failed: {e}")
+              tg_msg(f"✅ تم تحميل الفيديو بنجاح ({size_mb:.2f} MB).\n⚠️ تنبيه: تعذر استخراج ملف الـ VTT من اليوتيوب.")
 
           # حذف ملف الكوكيز فوراً للأمان
           if os.path.exists(COOKIES_FILE): 
