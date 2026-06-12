@@ -152,20 +152,14 @@ jobs:
               return os.path.isfile(out)
 
           async def run_pipeline():
-              # ============== STEP 1: Get Transcript (API METHOD) ==============
               print("\n📥 Getting transcript via Transcript API...")
               vid = vid_id(YT_URL)
               print(f"Video ID: {vid}")
 
               lines = []
               try:
-                  # استخراج الترجمة التلقائية أو اليدوية (العربية أو الإنجليزية كبديل)
-                  try:
-                      tl = YouTubeTranscriptApi.list_transcripts(vid)
-                      ts = tl.find_generated_transcript(['ar', 'en']).fetch()
-                  except:
-                      ts = YouTubeTranscriptApi.get_transcript(vid, languages=['ar', 'en'])
-
+                  # تصحيح الاستدعاء المباشر للدالة دون استخدام دوت نيم تابعة للكائن الفاشل
+                  ts = YouTubeTranscriptApi.get_transcript(vid, languages=['ar', 'en'])
                   for snippet in ts:
                       seconds = snippet['start']
                       h = int(seconds // 3600)
@@ -182,7 +176,7 @@ jobs:
               
               if not transcript.strip():
                   print("❌ No transcript found using API Method!")
-                  await tg_msg("❌ لم يتم العثور على ترجمة للفيديو")
+                  await tg_msg("❌ لم يتم العثور على ترجمة للفيديو (تأكد من انتهاء البث ومعالجة يوتيوب للترجمة التلقائية)")
                   sys.exit(1)
 
               print(f"✅ Got {len(lines)} lines of transcript")
@@ -302,10 +296,8 @@ jobs:
               await client.send_message(target, f"✅ **تم!**\n📊 {len(segments)} مقطع\n✅{sent} ❌{fail}")
               await client.disconnect()
 
-          # تشغيل خط الإنتاج البرمجي كاملاً داخل دالة الـ async بشكل صحيح
           asyncio.run(run_pipeline())
 
-          # تنظيف البيئة والملفات بعد الانتهاء
           if os.path.exists(VIDEO): os.remove(VIDEO)
           if os.path.exists(COOKIES): os.remove(COOKIES)
           shutil.rmtree(TMP, ignore_errors=True)
