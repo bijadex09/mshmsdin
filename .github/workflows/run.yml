@@ -67,7 +67,7 @@ jobs:
           EXPECTED_VTT = os.path.join(BASE_DIR, "sub_file.ar.vtt")
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
 
-          # إعدادات الصور والخطوط
+          # Assets settings
           FONT_SYSTEM_DIR = os.path.expanduser("~/.local/share/fonts")
           IMAGES_CACHE_DIR = os.path.expanduser("~/.local/share/images")
           FONT_NAME = "ReadexPro-Bold.ttf"
@@ -84,16 +84,16 @@ jobs:
           CACHED_BG_SHORT = os.path.join(IMAGES_CACHE_DIR, "background1.png")
           CACHED_BG_LONG = os.path.join(IMAGES_CACHE_DIR, "background.png")
 
-          # إعدادات الصوت والفيديو
+          # Video/Audio settings
           AUDIO_BITRATE = "96k"
           VIDEO_PRESET = "faster"
           VIDEO_CRF = 20
           SILENCE_THRESHOLD = 0.5
           VAD_AGGRESSIVENESS = 3
           
-          # إعدادات التوسيع
-          START_OFFSET = -3  # ناقص 3 ثواني (نزيد البداية)
-          END_OFFSET = 4     # زائد 4 ثواني (نزيد النهاية)
+          # Timing offsets
+          START_OFFSET = -3  # Add 3 seconds to start
+          END_OFFSET = 5     # Add 5 seconds to end
 
           def tg_msg(text):
               try:
@@ -106,6 +106,7 @@ jobs:
                   url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
                   with open(filepath, 'rb') as video:
                       files = {'video': video}
+                      # Use simplified caption
                       data = {'chat_id': int(TG_TARGET), 'caption': caption, 'supports_streaming': True}
                       response = requests.post(url, data=data, files=files, timeout=120)
                       if response.status_code == 200:
@@ -147,10 +148,10 @@ jobs:
               return f"{minutes:02d}:{secs:02d}"
 
           def time_to_seconds(time_str: str) -> float:
-              """تحويل تنسيق الوقت إلى ثواني (يدعم MM:SS, MM:SS.mmm, HH:MM:SS, HH:MM:SS.mmm)"""
+              """Convert time format to seconds (supports MM:SS, MM:SS.mmm, HH:MM:SS, HH:MM:SS.mmm)"""
               time_str = time_str.strip()
               
-              # إزالة أجزاء الملي ثانية إذا وجدت
+              # Remove milliseconds if present
               if '.' in time_str:
                   time_str = time_str.split('.')[0]
               
@@ -164,21 +165,20 @@ jobs:
               return 0.0
 
           def adjust_timestamp(start_time: str, end_time: str, video_duration: float) -> Tuple[str, str]:
-              """توسيع المقطع بإضافة START_OFFSET للبداية و END_OFFSET للنهاية"""
+              """Expand clip by adding START_OFFSET and END_OFFSET"""
               start_sec = time_to_seconds(start_time) + START_OFFSET
               end_sec = time_to_seconds(end_time) + END_OFFSET
               
-              # التأكد من عدم تجاوز حدود الفيديو
+              # Clamp to video boundaries
               start_sec = max(0, start_sec)
               end_sec = min(video_duration, end_sec)
               
-              # التأكد من أن النهاية بعد البداية
+              # Ensure end is after start
               if end_sec <= start_sec:
                   end_sec = start_sec + 1
               
               return seconds_to_time(start_sec), seconds_to_time(end_sec)
 
-          # دالة قص المقطع
           def extract_clip(video_path: str, start: str, end: str, output_path: str) -> bool:
               return run_cmd([
                   'ffmpeg', '-y',
@@ -191,7 +191,7 @@ jobs:
                   output_path
               ])
 
-          # دالة إزالة الصمت
+          # Silence removal functions
           def merge_segments(segments: List, threshold: float) -> List[Tuple[float, float]]:
               if not segments:
                   return []
@@ -296,7 +296,7 @@ jobs:
               
               return False, 0.0
 
-          # دوال إنشاء الصور
+          # Image generation functions
           def get_single_line_font_size(word_count):
               if word_count <= 3:
                   return 90
@@ -399,7 +399,7 @@ jobs:
               
               return os.path.exists(output_path)
 
-          # دالة دمج الفيديو مع الصورة
+          # Video merging function
           def process_tiktok_reel(video_path, image_path, output_path):
               filter_complex = (
                   "[0:v]loop=loop=-1:size=1:start=0,setpts=PTS-STARTPTS,scale=trunc(iw/2)*2:trunc(ih/2)*2[bg]; "
@@ -421,7 +421,7 @@ jobs:
               
               return run_cmd(cmd)
 
-          # تحميل الأصول
+          # Download assets
           def download_file(url, dest, name):
               if os.path.exists(dest):
                   return True
@@ -444,6 +444,7 @@ jobs:
           except Exception as e: 
               print(f"⚠️ Assets setup warning: {e}")
 
+          # Cookie setup
           if COOKIES_TEXT:
               with open(COOKIES_FILE, "w", encoding="utf-8") as f:
                   f.write(COOKIES_TEXT)
@@ -452,6 +453,7 @@ jobs:
               tg_msg("❌ خطأ: لم يتم العثور على السيكرت COOKIES_TEXT")
               sys.exit(1)
 
+          # Download video
           command = [
               "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
               "--remote-components", "ejs:github", "-f", "bestvideo+bestaudio/best",
@@ -475,10 +477,10 @@ jobs:
               tg_msg("❌ فشل تحميل الفيديو.")
               sys.exit(1)
 
-          # الحصول على مدة الفيديو الأصلي
           video_duration = get_duration(TEMP_VIDEO)
           print(f"📹 Video duration: {seconds_to_time(video_duration)}")
 
+          # Extract transcript
           print("\n📜 Extracting transcript...")
           srt_command = [
               "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
@@ -514,6 +516,7 @@ jobs:
               tg_msg("❌ تعذر استخراج ملف الترجمة، توقفت العملية.")
               sys.exit(1)
 
+          # Gemini AI Processing
           if not GEMINI_KEY:
               print("❌ GEMINI_API_KEY secret is missing!")
               tg_msg("❌ خطأ: لم يتم العثور على السيكرت GEMINI_API_KEY")
@@ -612,7 +615,7 @@ jobs:
               tg_msg(f"❌ حدث خطأ أثناء إرسال الطلب: {e}")
               sys.exit(1)
 
-          # استخراج المواقيت من رد جيميناي
+          # Parse and adjust clips
           clips = []
           for line in gemini_result.strip().split('\n'):
               if '|' in line:
@@ -623,7 +626,6 @@ jobs:
                       original_end = parts[1].strip()
                       title = parts[2].strip()
                       
-                      # تطبيق التعديلات على الوقت
                       new_start, new_end = adjust_timestamp(original_start, original_end, video_duration)
                       
                       clips.append({
@@ -642,7 +644,7 @@ jobs:
 
           tg_msg(f"🚀 تم تأكيد مواقيت جيميناي وبدء عملية القص والإنتاج لـ ({len(clips)}) مقطع...")
 
-          # معالجة كل مقطع
+          # Process each clip
           for idx, clip in enumerate(clips, 1):
               print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']}")
               
@@ -654,13 +656,13 @@ jobs:
               img_path = os.path.join(BASE_DIR, f"img_{idx}.png")
               output_path = os.path.join(BASE_DIR, f"{idx:02d}_{safe_name}.mp4")
               
-              # قص المقطع (باستخدام التوقيتات المعدلة)
+              # Cut clip
               print(f"  ✂️ Cutting: {clip['start']} → {clip['end']} (original: {clip['original_start']} → {clip['original_end']})")
               if not extract_clip(TEMP_VIDEO, clip['start'], clip['end'], raw_clip):
                   print(f"  ❌ Failed to cut clip")
                   continue
               
-              # إزالة الصمت
+              # Remove silence
               print(f"  🔇 Removing silence...")
               success, removed = remove_silence_from_video(raw_clip, vad_clip)
               if not success:
@@ -669,25 +671,25 @@ jobs:
               elif removed > 0:
                   print(f"  ✅ Removed {seconds_to_time(removed)} of silence")
               
-              # إنشاء الصورة
+              # Create image
               print(f"  🖼️ Creating image...")
               if not create_image_with_title(clip['title'], img_path):
                   print(f"  ❌ Failed to create image")
                   continue
               
-              # دمج الفيديو مع الصورة
+              # Merge video with image
               print(f"  🎬 Merging video with image...")
               if process_tiktok_reel(vad_clip, img_path, output_path) and os.path.exists(output_path):
                   size_mb = os.path.getsize(output_path) / (1024 * 1024)
                   print(f"  ✅ Merged successfully ({size_mb:.1f}MB)")
                   
-                  # إرسال إلى تليجرام
-                  caption_text = f"🎥 {clip['title']}\n\n⏱ التوقيت الأصلي: {clip['original_start']} 👈 {clip['original_end']}\n📌 التوقيت المعدل: {clip['start']} 👈 {clip['end']}"
+                  # Send to Telegram with simplified caption (only title, no emoji)
+                  caption_text = f"{clip['title']}"
                   tg_send_video(output_path, caption_text)
               else:
                   print(f"  ❌ Failed to merge")
               
-              # تنظيف الملفات المؤقتة
+              # Cleanup
               for temp_file in [raw_clip, vad_clip, img_path, output_path]:
                   if os.path.exists(temp_file):
                       try:
