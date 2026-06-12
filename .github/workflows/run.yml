@@ -62,7 +62,6 @@ jobs:
                   requests.post(url, json={"chat_id": int(TG_TARGET), "text": text}, timeout=15)
               except: pass
 
-          # 1. إنشاء ملف الكوكيز
           if COOKIES_TEXT:
               with open(COOKIES_FILE, "w", encoding="utf-8") as f:
                   f.write(COOKIES_TEXT)
@@ -71,7 +70,6 @@ jobs:
               tg_msg("❌ خطأ: لم يتم العثور على السيكرت COOKIES_TEXT")
               sys.exit(1)
 
-          # 2. تحميل الفيديو
           command = [
               "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
               "--remote-components", "ejs:github", "-f", "bestvideo+bestaudio/best",
@@ -95,7 +93,6 @@ jobs:
 
           size_mb = os.path.getsize(TEMP_VIDEO) / (1024 * 1024)
 
-          # 3. استخراج الترجمة VTT
           print("\n📜 Extracting transcript...")
           srt_command = [
               "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
@@ -129,13 +126,12 @@ jobs:
               tg_msg("❌ تعذر استخراج ملف الترجمة، توقفت العملية.")
               sys.exit(1)
 
-          # 4. معالجة النص وإرساله عبر Requests باستخدام نموذج gemini-flash-latest المباشر
           if not GEMINI_KEY:
               print("❌ GEMINI_API_KEY secret is missing!")
               tg_msg("❌ خطأ: لم يتم العثور على السيكرت GEMINI_API_KEY")
               sys.exit(1)
 
-          print("\n🤖 Sending transcript to Gemini via API Requests...")
+          print("\n🤖 Sending transcript to Gemini...")
           tg_msg("🤖 جاري الآن إرسال تفريغ النص إلى جيميناي عبر API للتحليل...")
 
           try:
@@ -180,7 +176,7 @@ jobs:
 
 **قواعد كتابة العناوين:**
 1. العنوان يجب أن يكون سؤالاً مختصراً يعبر عن جوهر المسألة
-2. استخدم صيغة السؤال: 'حكم كذا؟'، 'هل يجوز كذا？'، 'ما شرح كذا؟'
+2. استخدم صيغة السؤال: 'حكم كذا؟'، 'هل يجوز كذا؟'، 'ما شرح كذا؟'
 3. لا تتجاوز 10 كلمات
 4. اجعل العنوان واضحاً وسهل الفهم للمشاهد العادي
 
@@ -202,8 +198,7 @@ jobs:
 النص المراد تحليله:
 {transcript_data}"""
 
-              # ربط مباشر بالنموذج المطلوب gemini-flash-latest
-              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_KEY}"
+              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_KEY}"
               headers = {"Content-Type": "application/json"}
               payload = {
                   "contents": [
@@ -227,10 +222,10 @@ jobs:
                       out_f.write(gemini_result)
                       
                   tg_msg(f"📋 **نتائج استخراج الأسئلة من جيميناي:**\n\n{gemini_result}")
-                  print("✅ Completed successfully with gemini-flash-latest.")
+                  print("✅ Completed successfully.")
               else:
                   print(f"❌ Gemini API Error Status: {response.status_code}\nResponse: {response.text}")
-                  tg_msg(f"❌ فشل طلب جيميناي. كود الخطأ من السيرفر: {response.status_code}")
+                  tg_msg(f"❌ فشل طلب جيميناي. كود الخطأ: {response.status_code}")
                   sys.exit(1)
                   
           except Exception as e:
