@@ -22,12 +22,12 @@ jobs:
       - name: Setup System & Python Audio Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg fontconfig
-          pip install yt-dlp requests Pillow webrtcvad
+          sudo apt-get install -y ffmpeg fontconfig build-essential python3-dev
           pip install --upgrade pip
           pip install --upgrade yt-dlp
+          pip install requests Pillow webrtcvad-py
 
-      - name: Pipeline Execution (Download, VAD, Merge & Official Bot Upload)
+      - name: Pipeline Execution
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           TG_TARGET: ${{ github.event.inputs.telegram_target }}
@@ -48,7 +48,6 @@ jobs:
           import urllib.request
           from PIL import Image, ImageDraw, ImageFont
 
-          # بيانات التطبيق وتوكن البوت الرسمية
           API_ID = 24629594
           API_HASH = "a79fa760e65af09a85eb2cc97cb2263c"
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
@@ -113,19 +112,17 @@ jobs:
               tg_msg("❌ خطأ: لم يتم العثور على سيكرت الكوكيز COOKIES_TEXT")
               sys.exit(1)
 
-          # 1. تحميل الفيديو الأساسي
           print("\n📥 Downloading main video...")
           tg_msg("📥 جاري تحميل الفيديو الأصلي بالدقة الكاملة...")
-          cmd = ["yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node", "--remote-components", "ejs:github", "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", TEMP_VIDEO, YT_URL]
+          cmd = ["yt-dlp", "--cookies", COOKIES_FILE, "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", TEMP_VIDEO, YT_URL]
           res = subprocess.run(cmd, capture_output=True, text=True)
           
           if res.returncode != 0 or not os.path.exists(TEMP_VIDEO):
               tg_msg("❌ فشل تحميل الفيديو من يوتيوب.")
               sys.exit(1)
 
-          # 2. استخراج الترجمة
           print("\n📜 Extracting transcript VTT...")
-          srt_cmd = ["yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node", "--remote-components", "ejs:github", "--skip-download", "--write-auto-sub", "--sub-lang", "ar", "--output", SUB_OUTPUT, YT_URL]
+          srt_cmd = ["yt-dlp", "--cookies", COOKIES_FILE, "--skip-download", "--write-auto-sub", "--sub-lang", "ar", "--output", SUB_OUTPUT, YT_URL]
           subprocess.run(srt_cmd, capture_output=True, text=True)
           
           if os.path.exists(EXPECTED_VTT):
@@ -142,16 +139,9 @@ jobs:
 
           if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
 
-          # 3. جيميناي
           with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f: transcript_data = f.read()
           
-          user_prompt = f"""الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية. النص منسق كـ 'HH:MM:SS | النص'.
-مهمتك: استخراج جميع الأسئلة والإجابات بدقة، مع تحديد وقت بداية السؤال ووقت نهاية الإجابة لكل مسألة.
-**تنسيق الإخراج الإلزامي:**
-يجب أن يكون الإخراج بالضبط كالتالي:
-• [START_TIME] | [END_TIME] | [العنوان]
-النص المراد تحليله:
-{transcript_data}"""
+          user_prompt = f"الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية. النص منسق كـ 'HH:MM:SS | النص'.\nمهمتك: استخراج جميع الأسئلة والإجابات بدقة، مع تحديد وقت بداية السؤال ووقت نهاية الإجابة لكل مسألة.\n**تنسيق الإخراج الإلزامي:**\nيجب أن يكون الإخراج بالضبط كالتالي:\n• [START_TIME] | [END_TIME] | [العنوان]\nالنص المراد تحليله:\n{transcript_data}"
 
           api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
           payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
@@ -234,7 +224,6 @@ jobs:
                   draw = ImageDraw.Draw(img)
                   font = ImageFont.truetype(FONT_FULL_PATH, f_size)
                   
-                  # كتابة النص المنسق باللغة العربية متوافق مع الاتجاه من اليمين لليسار
                   if w_count >= 7:
                       words = title.strip().split()
                       h = (len(words) + 1) // 2
@@ -249,7 +238,6 @@ jobs:
                   print(f"⚠️ Pillow fail, falling back to FFmpeg drawtext: {e}")
                   subprocess.run(['ffmpeg', '-y', '-i', bg_path, '-vf', f"drawtext=fontfile='{FONT_FULL_PATH}':text='{title}':x=(w-text_w)/2:y=1390:fontcolor=white:fontsize={f_size}", '-frames:v', '1', output_img], quiet=True)
 
-          # 4. تفكيك المقاطع والرفع التتابعي المباشر للبوت
           clips = []
           for line in gemini_result.strip().split('\n'):
               if '|' in line:
@@ -273,17 +261,12 @@ jobs:
               final_img = os.path.join(BASE_DIR, f"img_{idx}.png")
               reel_output = os.path.join(BASE_DIR, f"{idx:02d}_{safe_name_str}.mp4")
               
-              # أ. القص
               cut_cmd = ['ffmpeg', '-y', '-ss', clip['start'], '-to', clip['end'], '-i', TEMP_VIDEO, '-c', 'copy', '-loglevel', 'error', raw_clip]
               if subprocess.run(cut_cmd).returncode != 0: continue
               
-              # ب. الـ VAD
               remove_silence(raw_clip, vad_clip)
-              
-              # ج. الصورة والعنوان بواسطة Pillow السريعة
               create_image(clip['title'], final_img)
               
-              # د. الدمج الرأسي Reel
               filter_complex = "[0:v]loop=loop=-1:size=1:start=0,setpts=PTS-STARTPTS,scale=1080:1920[bg]; [1:v]setpts=PTS-STARTPTS,crop=ih*4/5:ih:(iw-ow)/2:0,scale=820:1026[v_final]; [bg][v_final]overlay=(W-w)/2:150:shortest=1"
               merge_cmd = ["ffmpeg", "-y", "-i", final_img, "-i", vad_clip, "-filter_complex", filter_complex, "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-b:a", "96k", "-shortest", reel_output, "-loglevel", "error"]
               
@@ -298,8 +281,7 @@ jobs:
                   else:
                       print(f"❌ Failed to send Clip {idx}.")
               
-              # و. تنظيف القرص الفوري لكل مقطع لحفظ المساحة
               for temp_file in [raw_clip, vad_clip, final_img, reel_output]:
                   if os.path.exists(temp_file): os.remove(temp_file)
                   
-          tg_msg("🏁 اكتملت الدورة البرمجية المؤتمتة بالكامل! تم إنتاج ورفع جميع المقاطع الدينية لقناتك بنجاح واكتمال تنظيف القرص.")
+          tg_msg("🏁 اكتملت الدورة البرمجية المؤتمتة بالكامل! تم إنتاج ورفع جميع المقاطع الدينية لقنات
