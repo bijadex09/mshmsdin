@@ -86,76 +86,69 @@ jobs:
 
           got_subs = False
 
-          # Method 1: yt-dlp with cookies for auto-subs
+          # ميثود مُحدّثة تدعم صيغ الـ vtt وتحميل الترجمات التلقائية المتاحة
           print("\n🔄 Method 1: yt-dlp auto-subs...")
           try:
               opts = {
-                  'quiet': True, 'skip_download': True,
-                  'writesubtitles': True, 'writeautomaticsub': True,
-                  'subtitleslangs': ['ar'], 'subtitlesformat': 'srt',
-                  'outtmpl': 'sub_%(id)s', 'no_warnings': True,
+                  'quiet': True, 
+                  'skip_download': True,
+                  'writesubtitles': True, 
+                  'writeautomaticsub': True,
+                  'subtitleslangs': ['ar', 'ar-orig', 'en'],
+                  'outtmpl': 'sub_%(id)s', 
+                  'no_warnings': True,
                   'cookiefile': COOKIES,
-                  'extractor_args': {'youtube': {'player_client': ['android']}}
+                  'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
               }
               with yt_dlp.YoutubeDL(opts) as ydl:
                   ydl.download([YT_URL])
-              for f in glob.glob('sub_*.ar.srt') + glob.glob('sub_*.srt'):
+              
+              found_file = None
+              for f in glob.glob('sub_*'):
                   if os.path.isfile(f) and os.path.getsize(f) > 100:
-                      shutil.move(f, SUBS)
-                      got_subs = True
+                      found_file = f
                       break
+                      
+              if found_file:
+                  shutil.move(found_file, SUBS)
+                  got_subs = True
+                  print(f"✅ Subtitles file found: {found_file}")
           except Exception as e:
               print(f"  ⚠️ {str(e)[:100]}")
-
-          # Method 2: Direct API
-          if not got_subs:
-              print("\n🔄 Method 2: Direct API...")
-              try:
-                  sess = requests.Session()
-                  with open(COOKIES) as f:
-                      for line in f:
-                          if line.startswith('#') or not line.strip(): continue
-                          parts = line.strip().split('\t')
-                          if len(parts) >= 7 and 'youtube' in parts[0]:
-                              sess.cookies.set(parts[5], parts[6], domain=parts[0])
-
-                  r = sess.get(f'https://www.youtube.com/watch?v={vid}', headers={
-                      'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36'
-                  }, timeout=30)
-
-                  caps = re.findall(r'"captionTracks":\s*(\[.*?\])', r.text, re.DOTALL)
-                  if caps:
-                      tracks = json.loads(caps[0])
-                      for t in tracks:
-                          if t.get('languageCode') == 'ar':
-                              sr = sess.get(t['baseUrl'] + '&fmt=srt', timeout=30)
-                              if sr.status_code == 200:
-                                  with open(SUBS, 'w', encoding='utf-8') as f:
-                                      f.write(sr.text)
-                                  got_subs = True
-                                  break
-              except Exception as e:
-                  print(f"  ⚠️ {str(e)[:100]}")
 
           if not got_subs or not os.path.isfile(SUBS):
               print("❌ No transcript found!")
               asyncio.run(tg_msg("❌ لم يتم العثور على ترجمة للفيديو"))
               sys.exit(1)
 
-          # Parse SRT
+          # قراءة وتحليل ملفات الترجمة سواء كانت srt أو vtt بشكل مرن
           with open(SUBS, encoding='utf-8') as f:
               srt = f.read()
 
           lines = []
-          for block in srt.strip().split('\n\n'):
-              parts = block.strip().split('\n')
-              if len(parts) >= 3:
-                  time_match = re.search(r'(\d{2}:\d{2}:\d{2})', parts[1])
+          # تنظيف وتقسيم كتل النصوص البرمجية للترجمة
+          blocks = re.split(r'\n\s*\n', srt.strip())
+          for block in blocks:
+              parts = [p.strip() for p in block.split('\n') if p.strip()]
+              if len(parts) >= 2:
+                  # البحث عن التوقيت داخل الكتلة
+                  time_match = re.search(r'(\d{2}:\d{2}:\d{2})', parts[0]) or re.search(r'(\d{2}:\d{2}:\d{2})', parts[1])
                   if time_match:
-                      lines.append(f"{time_match.group(1)} | {' '.join(parts[2:])}")
+                      # تجميع نصوص الترجمة بعد تخطي الأسطر غير النصية
+                      text_lines = [p for p in parts if not re.match(r'^\d+$', p) and not '-->' in p]
+                      if text_lines:
+                          clean_text = ' '.join(text_lines)
+                          # إزالة وسوم الـ HTML التي تنتج أحياناً في الـ VTT
+                          clean_text = re.sub(r'<[^>]*>', '', clean_text)
+                          lines.append(f"{time_match.group(1)} | {clean_text}")
           
           transcript = '\n'.join(lines)
           print(f"✅ Got {len(lines)} lines of transcript")
+
+          if not transcript.strip():
+              print("❌ Transcript text is empty after parsing!")
+              asyncio.run(tg_msg("❌ نص الترجمة فارغ أو لم ينجح تحليله"))
+              sys.exit(1)
 
           # ============== STEP 2: Gemini Analysis ==============
           print("\n🤖 Analyzing with Gemini...")
@@ -173,7 +166,7 @@ jobs:
 
           if resp.status_code != 200:
               print(f"❌ Gemini error: {resp.status_code}")
-              asyncio.run(tg_msg("❌ فشل تحليل الترجمة"))
+              asyncio.run(tg_msg("❌ فشل تحليل الترجمة عبر الذكاء الاصطناعي"))
               sys.exit(1)
 
           stamps_text = resp.json()['candidates'][0]['content']['parts'][0]['text']
