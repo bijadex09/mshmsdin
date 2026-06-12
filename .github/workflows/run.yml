@@ -1,4 +1,4 @@
-name: YouTube Ultimate QA Automated Production Pipeline
+name: YouTube Ultimate QA Extractor
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       youtube_url:
         description: 'YouTube Video URL'
         required: true
-        default: 'https://youtu.be/NdVhKakgHMM'
+        default: 'https://youtu.be/NdVhKakgGHM'
       telegram_target:
         description: 'Telegram Channel/User ID'
         required: true
@@ -24,15 +24,15 @@ jobs:
         with:
           node-version: 20
 
-      - name: Setup System & Python Audio Dependencies
+      - name: Setup System Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg fontconfig build-essential python3-dev
+          sudo apt-get install -y ffmpeg
+          pip install yt-dlp telethon requests Pillow webrtcvad
           pip install --upgrade pip
           pip install --upgrade yt-dlp
-          pip install requests Pillow webrtcvad-wheels
 
-      - name: Pipeline Execution
+      - name: Process Video, Transcript & Gemini Requests API
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           TG_TARGET: ${{ github.event.inputs.telegram_target }}
@@ -42,47 +42,22 @@ jobs:
         run: |
           import os
           import sys
-          import re
-          import json
-          import time
-          import wave
-          import shutil
-          import tempfile
           import subprocess
           import requests
-          import urllib.request
-          from PIL import Image, ImageDraw, ImageFont
+          import json
 
-          API_ID = 24629594
-          API_HASH = "a79fa760e65af09a85eb2cc97cb2263c"
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
-          
           YT_URL = os.environ['YT_URL']
           TG_TARGET = os.environ['TG_TARGET']
           COOKIES_TEXT = os.environ.get('COOKIES_TEXT', '')
           GEMINI_KEY = os.environ.get('GEMINI_API_KEY', '')
 
-          BASE_DIR = os.getcwd()
+          BASE_DIR = os.path.dirname(os.path.abspath(__file__))
           TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
           COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
           SUB_OUTPUT = os.path.join(BASE_DIR, "sub_file")
           EXPECTED_VTT = os.path.join(BASE_DIR, "sub_file.ar.vtt")
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
-
-          FONT_SYSTEM_DIR = os.path.expanduser("~/.local/share/fonts")
-          IMAGES_CACHE_DIR = os.path.expanduser("~/.local/share/images")
-          FONT_FULL_PATH = os.path.join(FONT_SYSTEM_DIR, "ReadexPro-Bold.ttf")
-          
-          BACKGROUND_SHORT_URL = "https://raw.githubusercontent.com/bidjadraft/markdown/refs/heads/main/images/background1.png"
-          BACKGROUND_LONG_URL = "https://raw.githubusercontent.com/bidjadraft/markdown/refs/heads/main/images/background.png"
-          FONT_URL = "https://raw.githubusercontent.com/bidjadraft/markdown/refs/heads/main/fonts/ReadexPro-Bold.ttf"
-
-          os.makedirs(IMAGES_CACHE_DIR, exist_ok=True)
-          os.makedirs(FONT_SYSTEM_DIR, exist_ok=True)
-          
-          CACHED_FONT = os.path.join(IMAGES_CACHE_DIR, "ReadexPro-Bold.ttf")
-          CACHED_BG_SHORT = os.path.join(IMAGES_CACHE_DIR, "background1.png")
-          CACHED_BG_LONG = os.path.join(IMAGES_CACHE_DIR, "background.png")
 
           def tg_msg(text):
               try:
@@ -90,31 +65,12 @@ jobs:
                   requests.post(url, json={"chat_id": int(TG_TARGET), "text": text}, timeout=15)
               except: pass
 
-          def tg_send_video(filepath, caption):
-              try:
-                  url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
-                  with open(filepath, 'rb') as video_file:
-                      files = {'video': video_file}
-                      data = {'chat_id': int(TG_TARGET), 'caption': caption, 'supports_streaming': True}
-                      res = requests.post(url, files=files, data=data, timeout=120)
-                      return res.status_code == 200
-              except Exception as e:
-                  print(f"⚠️ Upload error: {e}")
-                  return False
-
-          try:
-              if not os.path.exists(CACHED_FONT): urllib.request.urlretrieve(FONT_URL, CACHED_FONT)
-              if not os.path.exists(CACHED_BG_SHORT): urllib.request.urlretrieve(BACKGROUND_SHORT_URL, CACHED_BG_SHORT)
-              if not os.path.exists(CACHED_BG_LONG): urllib.request.urlretrieve(BACKGROUND_LONG_URL, CACHED_BG_LONG)
-              if not os.path.exists(FONT_FULL_PATH):
-                  shutil.copy2(CACHED_FONT, FONT_FULL_PATH)
-                  subprocess.run(['fc-cache', '-fv'], capture_output=True)
-          except Exception as e: print(f"⚠️ Assets setup warning: {e}")
-
           if COOKIES_TEXT:
-              with open(COOKIES_FILE, "w", encoding="utf-8") as f: f.write(COOKIES_TEXT.strip())
+              with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+                  f.write(COOKIES_TEXT)
           else:
-              tg_msg("❌ خطأ: لم يتم العثور على سيكرت الكوكيز COOKIES_TEXT")
+              print("❌ COOKIES_TEXT secret is missing!")
+              tg_msg("❌ خطأ: لم يتم العثور على السيكرت COOKIES_TEXT")
               sys.exit(1)
 
           command = [
@@ -123,42 +79,67 @@ jobs:
               "--merge-output-format", "mp4", "-o", TEMP_VIDEO, YT_URL
           ]
 
-          print("\n📥 Downloading main video...")
-          tg_msg("📥 جاري تحميل الفيديو الأصلي بالدقة الكاملة...")
-          res = subprocess.run(command, capture_output=True, text=True)
-          
-          if res.returncode != 0 or not os.path.exists(TEMP_VIDEO):
-              print(f"yt-dlp Error Log: {res.stderr}")
-              tg_msg("❌ فشل تحميل الفيديو من يوتيوب.")
+          print("\n📥 Downloading video...")
+          tg_msg("📥 جاري تحميل الفيديو بأعلى دقة...")
+
+          video_success = False
+          try:
+              result = subprocess.run(command, capture_output=True, text=True)
+              video_success = result.returncode == 0 and os.path.exists(TEMP_VIDEO)
+          except Exception as e: print(f"❌ Subprocess failed: {e}")
+
+          if not video_success:
               if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
+              print("❌ Download failed!")
+              tg_msg("❌ فشل تحميل الفيديو.")
               sys.exit(1)
 
-          print("\n📜 Extracting transcript VTT...")
-          srt_cmd = [
+          print("\n📜 Extracting transcript...")
+          srt_command = [
               "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
               "--remote-components", "ejs:github", "--skip-download",
               "--write-auto-sub", "--sub-lang", "ar", "--output", SUB_OUTPUT, YT_URL
           ]
-          subprocess.run(srt_cmd, capture_output=True, text=True)
-          
-          if os.path.exists(EXPECTED_VTT):
-              with open(EXPECTED_VTT, "r", encoding="utf-8") as vtt_f: vtt_content = vtt_f.read()
-              lines = []
-              for line in vtt_content.split('\n'):
-                  line = line.strip()
-                  if line and not line.startswith('WEBVTT') and not line.startswith('Kind:') and not line.startswith('Language:') and '-->' not in line:
-                      if not lines or lines[-1] != line: lines.append(line)
-              with open(FINAL_TRANSCRIPT, "w", encoding="utf-8") as f: f.write('\n'.join(lines))
-          else:
-              tg_msg("❌ تعذر استخراج ملف الترجمة التلقائية للتحليل.")
-              if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
-              sys.exit(1)
+
+          transcript_exists = False
+          try:
+              subprocess.run(srt_command, capture_output=True, text=True)
+              if os.path.exists(EXPECTED_VTT):
+                  with open(EXPECTED_VTT, "r", encoding="utf-8") as vtt_f:
+                      vtt_content = vtt_f.read()
+
+                  lines = []
+                  for line in vtt_content.split('\n'):
+                      line = line.strip()
+                      if line and not line.startswith('WEBVTT') and not line.startswith('Kind:') and not line.startswith('Language:') and '-->' not in line:
+                          if not lines or lines[-1] != line:
+                              lines.append(line)
+
+                  with open(FINAL_TRANSCRIPT, "w", encoding="utf-8") as f:
+                      f.write('\n'.join(lines))
+                  transcript_exists = True
+          except Exception as e: print(f"❌ VTT Extraction failed: {e}")
 
           if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
 
-          with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f: transcript_data = f.read()
-          
-          user_prompt = f"""الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية. النص منسق كـ 'HH:MM:SS | النص'.
+          if not transcript_exists:
+              print("❌ Transcript not found!")
+              tg_msg("❌ تعذر استخراج ملف الترجمة، توقفت العملية.")
+              sys.exit(1)
+
+          if not GEMINI_KEY:
+              print("❌ GEMINI_API_KEY secret is missing!")
+              tg_msg("❌ خطأ: لم يتم العثور على السيكرت GEMINI_API_KEY")
+              sys.exit(1)
+
+          print("\n🤖 Sending transcript to Gemini...")
+          tg_msg("🤖 جاري الآن إرسال تفريغ النص إلى جيميناي عبر API للتحليل...")
+
+          try:
+              with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
+                  transcript_data = f.read()
+
+              user_prompt = f"""الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية. النص منسق كـ 'HH:MM:SS | النص'.
 
           مهمتك: استخراج جميع الأسئلة والإجابات بدقة، مع تحديد وقت بداية السؤال ووقت نهاية الإجابة لكل مسألة.
 
@@ -185,6 +166,8 @@ jobs:
           **تنسيق الإخراج الإلزامي:**
           يجب أن يكون الإخراج بالضبط كالتالي:
           • [START_TIME] | [END_TIME] | [العنوان]
+          • [START_TIME] | [END_TIME] | [العنوان]
+          • [START_TIME] | [END_TIME] | [العنوان]
 
           **قواعد الأوقات:**
           1. START_TIME: وقت بداية السؤال (أول كلمة للسؤال)
@@ -198,150 +181,56 @@ jobs:
           3. لا تتجاوز 10 كلمات
           4. اجعل العنوان واضحاً وسهل الفهم للمشاهد العادي
 
+          **أمثلة على التنسيق المطلوب:**
+          • 03:44 | 08:30 | حكم الصلاة في الثياب المتسخة
+          • 15:20 | 22:45 | هل يجوز صلاة الجمعة بدون خطبة
+          • 01:05:30 | 01:12:15 | شرح حديث الجارية
+          • 02:30:15 | 02:38:20 | الفرق بين الزكاة والصدقة
+
+          **تنبيهات مهمة:**
+          1. لا تخرج أي شيء غير التنسيق المطلوب
+          2. لا تكرر نفس السؤال في مقاطع متعددة
+          3. إذا لم تجد سؤالاً واضحاً، لا تخرج شيئاً
+          4. تأكد من أن END_TIME بعد START_TIME
+          5. افحص النص جيداً لاستخراج كل الأسئلة دون استثناء
+
           ابدأ الإخراج مباشرة دون أي مقدمة أو شرح.
 
           النص المراد تحليله:
           {transcript_data}"""
 
-          api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-          payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
-          response = requests.post(api_url, headers={"Content-Type": "application/json"}, json=payload, timeout=60)
-          
-          if response.status_code != 200:
-              tg_msg("❌ فشل الاتصال بجيميناي لتحليل النصوص.")
+              # استخدام المسار الرسمي والجيل الحديث والمستقر من نموذج الـ Flash
+              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+              headers = {"Content-Type": "application/json"}
+              payload = {
+                  "contents": [
+                      {
+                          "parts": [
+                              {"text": user_prompt}
+                          ]
+                      }
+                  ]
+              }
+
+              response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+
+              if response.status_code == 200:
+                  res_json = response.json()
+                  gemini_result = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+
+                  print("\n✨ Gemini API Result:\n", gemini_result)
+
+                  with open(os.path.join(BASE_DIR, "gemini_output.txt"), "w", encoding="utf-8") as out_f:
+                      out_f.write(gemini_result)
+
+                  tg_msg(f"📋 **نتائج استخراج الأسئلة من جيميناي:**\n\n{gemini_result}")
+                  print("✅ Completed successfully.")
+              else:
+                  print(f"❌ Gemini API Error Status: {response.status_code}\nResponse: {response.text}")
+                  tg_msg(f"❌ فشل طلب جيميناي. كود الخطأ: {response.status_code}")
+                  sys.exit(1)
+
+          except Exception as e:
+              print(f"❌ Requests processing failed: {e}")
+              tg_msg(f"❌ حدث خطأ أثناء إرسال الطلب: {e}")
               sys.exit(1)
-
-          gemini_result = response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-          print("\n✨ Gemini Output:\n", gemini_result)
-
-          def safe_title(t):
-              return "".join(c for c in t if c.isalnum() or c in ' _-').replace(' ', '_')[:60]
-
-          def remove_silence(inp, outp):
-              try:
-                  import webrtcvad
-                  vad = webrtcvad.Vad(3)
-                  temp_wav = inp + ".wav"
-                  if subprocess.run(['ffmpeg', '-y', '-i', inp, '-ar', '16000', '-ac', '1', temp_wav, '-loglevel', 'quiet']).returncode != 0:
-                      shutil.copy2(inp, outp)
-                      return
-                  with wave.open(temp_wav, 'rb') as wav:
-                      rate = wav.getframerate()
-                      frames = wav.readframes(wav.getnframes())
-                  frame_duration = 30
-                  frame_size = int(rate * frame_duration / 1000) * 2
-                  segments = []
-                  speech = False
-                  start_time = 0.0
-                  for i in range(0, len(frames) - frame_size, frame_size):
-                      is_speech = vad.is_speech(frames[i:i+frame_size], rate)
-                      current_time = i / (rate * 2)
-                      if is_speech and not speech:
-                          speech = True
-                          start_time = max(0, current_time - 0.2)
-                      elif not is_speech and speech:
-                          speech = False
-                          segments.append((start_time, current_time + 0.2))
-                  if speech: segments.append((start_time, len(frames) / (rate * 2)))
-                  if not segments:
-                      shutil.copy2(inp, outp)
-                      return
-                  merged = []
-                  cs, ce = segments[0]
-                  for ns, ne in segments[1:]:
-                      if ns - ce <= 0.5: ce = max(ce, ne)
-                      else:
-                          merged.append((cs, ce))
-                          cs, ce = ns, ne
-                  merged.append((cs, ce))
-                  
-                  with tempfile.TemporaryDirectory() as t_dir:
-                      seg_files = []
-                      for idx, (s, e) in enumerate(merged):
-                          if e - s < 0.5: continue
-                          s_file = os.path.join(t_dir, f"s_{idx}.mp4")
-                          if subprocess.run(['ffmpeg', '-y', '-ss', f"{s:.3f}", '-i', inp, '-t', f"{e-s:.3f}", '-c:v', 'libx264', '-preset', 'faster', '-crf', '22', '-c:a', 'aac', '-b:a', '96k', s_file, '-loglevel', 'quiet']).returncode == 0:
-                              seg_files.append(s_file)
-                      if not seg_files:
-                          shutil.copy2(inp, outp)
-                          return
-                      c_file = os.path.join(t_dir, "c.txt")
-                      with open(c_file, 'w') as f:
-                          for sf in seg_files: f.write(f"file '{sf}'\n")
-                      subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', c_file, '-c', 'copy', outp, '-loglevel', 'quiet'])
-                  if os.path.exists(temp_wav): os.remove(temp_wav)
-              except Exception as e:
-                  print(f"VAD Error: {e}")
-                  shutil.copy2(inp, outp)
-
-          def create_image(title, output_img):
-              try:
-                  w_count = len(title.strip().split())
-                  bg_path = CACHED_BG_LONG if w_count >= 7 else CACHED_BG_SHORT
-                  f_size = 62 if w_count >= 7 else (85 if w_count <= 3 else 66)
-                  
-                  img = Image.open(bg_path).convert("RGBA")
-                  draw = ImageDraw.Draw(img)
-                  font = ImageFont.truetype(FONT_FULL_PATH, f_size)
-                  
-                  if w_count >= 7:
-                      words = title.strip().split()
-                      h = (len(words) + 1) // 2
-                      l1, l2 = " ".join(words[:h]), " ".join(words[h:])
-                      draw.text((540, 1370), l1, font=font, fill="white", anchor="mm")
-                      draw.text((540, 1470), l2, font=font, fill="white", anchor="mm")
-                  else:
-                      draw.text((540, 1390), title, font=font, fill="white", anchor="mm")
-                      
-                  img.convert("RGB").save(output_img, "PNG")
-              except Exception as e:
-                  print(f"⚠️ Pillow fail, falling back to FFmpeg drawtext: {e}")
-                  subprocess.run(['ffmpeg', '-y', '-i', bg_path, '-vf', f"drawtext=fontfile='{FONT_FULL_PATH}':text='{title}':x=(w-text_w)/2:y=1390:fontcolor=white:fontsize={f_size}", '-frames:v', '1', output_img], quiet=True)
-
-          clips = []
-          for line in gemini_result.strip().split('\n'):
-              if '|' in line:
-                  line = line.lstrip('• ').strip()
-                  parts = line.split('|')
-                  if len(parts) >= 3:
-                      clips.append({'start': parts[0].strip(), 'end': parts[1].strip(), 'title': parts[2].strip()})
-
-          if not clips:
-              tg_msg("⚠️ لم يعثر جيميناي على مقاطع أسئلة واضحة ومطابقة للبرومبت.")
-              sys.exit(0)
-
-          tg_msg(f"🚀 تم العثور على ({len(clips)}) مقطع سؤال وجواب ديني. جاري الإنتاج والرفع التتابعي للقناة عبر البوت الرسمي مباشرة...")
-
-          for idx, clip in enumerate(clips, 1):
-              print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']}")
-              safe_name_str = safe_title(clip['title'])
-              
-              raw_clip = os.path.join(BASE_DIR, f"raw_{idx}.mp4")
-              vad_clip = os.path.join(BASE_DIR, f"vad_{idx}.mp4")
-              final_img = os.path.join(BASE_DIR, f"img_{idx}.png")
-              reel_output = os.path.join(BASE_DIR, f"{idx:02d}_{safe_name_str}.mp4")
-              
-              cut_cmd = ['ffmpeg', '-y', '-ss', clip['start'], '-to', clip['end'], '-i', TEMP_VIDEO, '-c', 'copy', '-loglevel', 'error', raw_clip]
-              if subprocess.run(cut_cmd).returncode != 0: continue
-              
-              remove_silence(raw_clip, vad_clip)
-              create_image(clip['title'], final_img)
-              
-              filter_complex = "[0:v]loop=loop=-1:size=1:start=0,setpts=PTS-STARTPTS,scale=1080:1920[bg]; [1:v]setpts=PTS-STARTPTS,crop=ih*4/5:ih:(iw-ow)/2:0,scale=820:1026[v_final]; [bg][v_final]overlay=(W-w)/2:150:shortest=1"
-              merge_cmd = ["ffmpeg", "-y", "-i", final_img, "-i", vad_clip, "-filter_complex", filter_complex, "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-b:a", "96k", "-shortest", reel_output, "-loglevel", "error"]
-              
-              if subprocess.run(merge_cmd).returncode == 0 and os.path.exists(reel_output):
-                  size_mb = os.path.getsize(reel_output) / (1024 * 1024)
-                  print(f"✅ Produced Reel ({size_mb:.2f} MB). Uploading via Bot API...")
-                  
-                  caption_text = f"🎥 {clip['title']}\n\n⏱ التوقيت الأصلي: {clip['start']} 👈 {clip['end']}\n⚙️ تم الإنتاج والحذف التلقائي للصمت بنجاح."
-                  
-                  if tg_send_video(reel_output, caption_text):
-                      print(f"🚀 Sent Clip {idx} successfully.")
-                  else:
-                      print(f"❌ Failed to send Clip {idx}.")
-              
-              for temp_file in [raw_clip, vad_clip, final_img, reel_output]:
-                  if os.path.exists(temp_file): os.remove(temp_file)
-                  
-          tg_msg("🏁 اكتملت الدورة البرمجية المؤتمتة بالكامل! تم إنتاج ورفع جميع المقاطع لقناتك بنجاح واكتمال تنظيف القرص.")
