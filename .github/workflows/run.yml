@@ -155,21 +155,18 @@ jobs:
               return os.path.isfile(out)
 
           async def run_pipeline():
-              print("\n📥 Extracting transcript securely via API-independent tool...")
+              print("\n📥 Extracting transcript natively...")
               vid = vid_id(YT_URL)
               lines = []
               
+              # محاولة جلب الترجمة العربية أولاً، وتجربة اللغات الأخرى تلقائياً عند عدم توفرها
               try:
-                  # جلب قائمة جميع التراجم المتوفرة للفيديو (تلقائية أو أصلية بجميع اللغات)
-                  transcript_list = YouTubeTranscriptApi.list_transcripts(vid)
-                  
-                  # محاولة جلب الترجمة العربية أولاً، وإذا لم تتوفر يجلب الترجمة الافتراضية بأي لغة كانت تلقائياً
                   try:
-                      srt = transcript_list.find_transcript(['ar']).fetch()
-                      print("✅ Arabic transcript selected.")
+                      srt = YouTubeTranscriptApi.get_transcript(vid, languages=['ar'])
+                      print("✅ Arabic transcript extracted.")
                   except:
-                      srt = transcript_list.find_transcript(['en', 'fr', 'es', 'de']).fetch()
-                      print("✅ Alternative available language transcript selected.")
+                      srt = YouTubeTranscriptApi.get_transcript(vid, languages=['en', 'fr', 'es', 'de'])
+                      print("✅ Available alternative language transcript extracted.")
                       
                   for item in srt:
                       seconds = float(item['start'])
@@ -186,7 +183,7 @@ jobs:
               transcript = '\n'.join(lines)
               if not transcript.strip():
                   print("❌ Could not extract text from this video.")
-                  await tg_msg("❌ فشل استخراج النص: هذا الفيديو لا يحتوي على أي ملف ترجمة مفعل حالياً.")
+                  await tg_msg("❌ فشل استخراج النص: هذا الفيديو لا يحتوي على أي ملف ترجمة متوفر حالياً.")
                   sys.exit(1)
 
               print(f"✅ Processed {len(lines)} formatted lines successfully.")
