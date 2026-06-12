@@ -147,8 +147,14 @@ jobs:
               return f"{minutes:02d}:{secs:02d}"
 
           def time_to_seconds(time_str: str) -> float:
-              """تحويل تنسيق الوقت إلى ثواني"""
-              parts = time_str.strip().split(':')
+              """تحويل تنسيق الوقت إلى ثواني (يدعم MM:SS, MM:SS.mmm, HH:MM:SS, HH:MM:SS.mmm)"""
+              time_str = time_str.strip()
+              
+              # إزالة أجزاء الملي ثانية إذا وجدت
+              if '.' in time_str:
+                  time_str = time_str.split('.')[0]
+              
+              parts = time_str.split(':')
               if len(parts) == 2:  # MM:SS
                   minutes, seconds = map(int, parts)
                   return minutes * 60 + seconds
@@ -675,7 +681,7 @@ jobs:
                   size_mb = os.path.getsize(output_path) / (1024 * 1024)
                   print(f"  ✅ Merged successfully ({size_mb:.1f}MB)")
                   
-                  # إرسال إلى تليجرام (مع عرض التوقيتات الأصلية والمعدلة)
+                  # إرسال إلى تليجرام
                   caption_text = f"🎥 {clip['title']}\n\n⏱ التوقيت الأصلي: {clip['original_start']} 👈 {clip['original_end']}\n📌 التوقيت المعدل: {clip['start']} 👈 {clip['end']}"
                   tg_send_video(output_path, caption_text)
               else:
