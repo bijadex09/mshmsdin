@@ -44,14 +44,19 @@ jobs:
           import sys
           import wave
           import shutil
+          import asyncio
           import tempfile
           import subprocess
           import requests
           import json
           import urllib.request
           from PIL import Image, ImageDraw, ImageFont
+          from telethon import TelegramClient
 
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
+          API_ID = 26585141
+          API_HASH = "80f12da304a444f6f168cd155c56d787"
+          
           YT_URL = os.environ['YT_URL']
           TG_TARGET = os.environ['TG_TARGET']
           COOKIES_TEXT = os.environ.get('COOKIES_TEXT', '')
@@ -85,16 +90,14 @@ jobs:
                   requests.post(url, json={"chat_id": int(TG_TARGET), "text": text}, timeout=15)
               except: pass
 
-          def tg_send_video(filepath, caption):
+          async def tg_send_video_telethon(filepath, caption):
               try:
-                  url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
-                  with open(filepath, 'rb') as video_file:
-                      files = {'video': video_file}
-                      data = {'chat_id': int(TG_TARGET), 'caption': caption, 'supports_streaming': True}
-                      res = requests.post(url, files=files, data=data, timeout=120)
-                      return res.status_code == 200
+                  async with TelegramClient('bot_session', API_ID, API_HASH) as client:
+                      await client.start(bot_token=BOT_TOKEN)
+                      await client.send_file(int(TG_TARGET), filepath, caption=caption, supports_streaming=True)
+                      return True
               except Exception as e:
-                  print(f"⚠️ Upload error: {e}")
+                  print(f"⚠️ Telethon Upload error: {e}")
                   return False
 
           try:
@@ -266,9 +269,6 @@ jobs:
               tg_msg(f"❌ حدث خطأ أثناء إرسال الطلب: {e}")
               sys.exit(1)
 
-          # ----------------------------------------------------
-          # مرحلة بدء القص والإنتاج الفوري تالياً للتحميل والمواقيت
-          # ----------------------------------------------------
           def safe_title(t):
               return "".join(c for c in t if c.isalnum() or c in ' _-').replace(' ', '_')[:60]
 
@@ -387,7 +387,7 @@ jobs:
               
               if subprocess.run(merge_cmd).returncode == 0 and os.path.exists(reel_output):
                   caption_text = f"🎥 {clip['title']}\n\n⏱ التوقيت من الفيديو الأصلي: {clip['start']} 👈 {clip['end']}"
-                  tg_send_video(reel_output, caption_text)
+                  asyncio.run(tg_send_video_telethon(reel_output, caption_text))
               
               for temp_file in [raw_clip, vad_clip, final_img, reel_output]:
                   if os.path.exists(temp_file): os.remove(temp_file)
