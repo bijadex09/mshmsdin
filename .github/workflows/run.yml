@@ -2,7 +2,6 @@ name: YouTube Ultimate QA Extractor - Daily Schedule
 
 on:
   schedule:
-    # يعمل كل يوم في الساعة 00:00 (12 منتصف الليل) بالتوقيت العالمي UTC
     - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
@@ -38,7 +37,7 @@ jobs:
 
       - name: Process Single Video
         env:
-          TG_TARGET: ${{ secrets.TELEGRAM_TARGET }}
+          TG_TARGET: ${{ github.event.inputs.telegram_target }}
           COOKIES_TEXT: ${{ secrets.COOKIES_TEXT }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -86,7 +85,6 @@ jobs:
           
           VIDEOS_FILE_PATH = "videos.txt"
           SCHEDULE_FILE_PATH = "schedule.json"
-          LOG_FILE_PATH = "processing_log.txt"
           BASE_DIR = os.getcwd()
           TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
           COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
@@ -121,20 +119,6 @@ jobs:
           END_OFFSET = 5
           TELEGRAM_LIMIT = 20 * 1024 * 1024
 
-          # ========== دوال السجل ==========
-          def log_message(msg):
-              """تسجيل الرسائل في ملف السجل"""
-              timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-              log_entry = f"[{timestamp}] {msg}"
-              print(log_entry)
-              
-              # حفظ في ملف السجل
-              try:
-                  with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
-                      f.write(log_entry + '\n')
-              except:
-                  pass
-
           # ========== دوال GitHub API ==========
           def get_github_headers():
               return {
@@ -143,7 +127,6 @@ jobs:
               }
 
           def get_first_url():
-              """قراءة أول رابط فقط من ملف videos.txt"""
               url = f"https://api.github.com/repos/{REPO_NAME}/contents/{VIDEOS_FILE_PATH}"
               headers = get_github_headers()
               
@@ -154,21 +137,20 @@ jobs:
                       content = base64.b64decode(data['content']).decode('utf-8')
                       urls = [line.strip() for line in content.splitlines() if line.strip()]
                       if urls:
-                          log_message(f"✅ First URL: {urls[0]}")
-                          log_message(f"📊 Total URLs remaining: {len(urls)}")
+                          print(f"✅ First URL: {urls[0]}")
+                          print(f"📊 Total URLs remaining: {len(urls)}")
                           return urls[0], urls[1:], data['sha']
                       else:
-                          log_message("✅ No URLs found in videos.txt")
+                          print("✅ No URLs found in videos.txt")
                           return None, [], None
                   else:
-                      log_message(f"❌ Failed to read videos.txt: {response.status_code}")
+                      print(f"❌ Failed to read videos.txt: {response.status_code}")
                       return None, [], None
               except Exception as e:
-                  log_message(f"❌ Error: {e}")
+                  print(f"❌ Error: {e}")
                   return None, [], None
 
           def update_videos_file(remaining_urls, current_sha):
-              """تحديث الملف بحذف الرابط الأول فقط"""
               if not current_sha:
                   return False
               
@@ -188,67 +170,16 @@ jobs:
               try:
                   response = requests.put(url, headers=headers, json=data)
                   if response.status_code == 200:
-                      log_message(f"✅ Removed URL from videos.txt. Remaining: {len(remaining_urls)}")
+                      print(f"✅ Removed URL from videos.txt. Remaining: {len(remaining_urls)}")
                       return True
                   else:
-                      log_message(f"❌ Failed to update: {response.status_code}")
+                      print(f"❌ Failed to update: {response.status_code}")
                       return False
               except Exception as e:
-                  log_message(f"❌ Error: {e}")
+                  print(f"❌ Error: {e}")
                   return False
 
-          # ========== التحقق من وجود ترجمة ==========
-          def check_subtitles(youtube_url):
-              """التحقق من وجود ترجمة عربية قبل تحميل الفيديو"""
-              log_message("🔍 Checking for Arabic subtitles...")
-              
-              with open(COOKIES_FILE, "w") as f:
-                  f.write(COOKIES_TEXT)
-              
-              # استخدام yt-dlp لفحص الترجمة فقط
-              cmd = [
-                  "yt-dlp", "--cookies", COOKIES_FILE,
-                  "--list-subs", "--skip-download",
-                  youtube_url
-              ]
-              
-              try:
-                  result = subprocess.run(cmd, capture_output=True, text=True)
-                  output = result.stdout + result.stderr
-                  
-                  has_arabic = False
-                  for line in output.split('\n'):
-                      if 'ar' in line.lower() or 'arabic' in line.lower():
-                          has_arabic = True
-                          break
-                  
-                  # التحقق أيضاً من وجود ملف الترجمة التلقائية
-                  test_cmd = [
-                      "yt-dlp", "--cookies", COOKIES_FILE,
-                      "--write-auto-sub", "--sub-lang", "ar",
-                      "--skip-download", "--sub-format", "vtt",
-                      "-o", SUB_OUTPUT, youtube_url
-                  ]
-                  subprocess.run(test_cmd, capture_output=True, text=True)
-                  
-                  if os.path.exists(EXPECTED_VTT):
-                      has_arabic = True
-                  
-                  if has_arabic:
-                      log_message("✅ Arabic subtitles found!")
-                  else:
-                      log_message("❌ No Arabic subtitles found for this video")
-                  
-                  return has_arabic
-                  
-              except Exception as e:
-                  log_message(f"❌ Error checking subtitles: {e}")
-                  return False
-              finally:
-                  if os.path.exists(COOKIES_FILE):
-                      os.remove(COOKIES_FILE)
-
-          # ========== دوال التحميل والمعالجة ==========
+          # ========== دوال التحميل الأساسية ==========
           def download_file(url, dest):
               if os.path.exists(dest): return True
               try: urllib.request.urlretrieve(url, dest); return True
@@ -261,8 +192,7 @@ jobs:
               if not os.path.exists(FONT_FULL_PATH):
                   shutil.copy2(CACHED_FONT, FONT_FULL_PATH)
                   subprocess.run(['fc-cache', '-fv'], capture_output=True)
-          except Exception as e: 
-              log_message(f"⚠️ Assets warning: {e}")
+          except Exception as e: print(f"⚠️ Assets warning: {e}")
 
           def get_duration(file_path: str) -> float:
               try:
@@ -410,6 +340,7 @@ jobs:
               filter_complex = "[0:v]loop=-1:1:0,setpts=PTS-STARTPTS,scale=1080:1920[bg]; [1:v]setpts=PTS-STARTPTS,crop=ih*4/5:ih:(iw-ow)/2:0,scale=820:1026[v_final]; [bg][v_final]overlay=(W-w)/2:150:shortest=1"
               return run_cmd(["ffmpeg", "-y", "-i", image_path, "-i", video_path, "-filter_complex", filter_complex, "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest", output_path])
 
+          # ========== دوال الإرسال ==========
           def tg_send_video_requests(filepath, caption):
               try:
                   url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
@@ -432,9 +363,10 @@ jobs:
                   return asyncio.run(tg_send_video_telethon(filepath, caption))
               return tg_send_video_requests(filepath, caption)
 
+          # ========== دوال YouTube ==========
           def get_youtube_service():
               if not all([YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN]):
-                  log_message("⚠️ YouTube credentials missing")
+                  print("⚠️ YouTube credentials missing")
                   return None
               
               creds = Credentials(
@@ -447,9 +379,7 @@ jobs:
               )
               
               if creds.expired:
-                  log_message("🔄 Refreshing YouTube token...")
                   creds.refresh(AuthRequest())
-                  log_message("✅ YouTube token refreshed")
               
               return build('youtube', 'v3', credentials=creds)
 
@@ -476,12 +406,13 @@ jobs:
                   response = request.execute()
                   
                   if response and response.get('id'):
-                      log_message(f"✅ YouTube scheduled! Video ID: {response['id']}")
+                      print(f"✅ YouTube scheduled! Video ID: {response['id']}")
                       return response['id']
               except Exception as e:
-                  log_message(f"❌ YouTube error: {e}")
+                  print(f"❌ YouTube error: {e}")
               return None
 
+          # ========== دوال Gemini ==========
           def get_gemini_prompt(transcript):
               return f"""استخرج جميع الأسئلة والإجابات من هذا النص. النص منسق كـ 'HH:MM:SS | النص'.
 
@@ -574,76 +505,110 @@ jobs:
               
               schedule["scheduled_videos"].append(scheduled)
               save_schedule(schedule)
-              log_message(f"📅 Scheduled: {video_title} at {scheduled['publish_time']}")
+              print(f"📅 Scheduled: {video_title} at {scheduled['publish_time']}")
               return scheduled
 
           # ========== المعالجة الرئيسية ==========
           def process_video(youtube_url):
-              log_message(f"\n{'='*60}\nProcessing: {youtube_url}\n{'='*60}")
+              print(f"\n{'='*60}\nProcessing: {youtube_url}\n{'='*60}")
               
-              # 1. التحقق من وجود ترجمة أولاً
-              if not check_subtitles(youtube_url):
-                  log_message("❌ Video skipped: No Arabic subtitles available")
-                  return False
-              
-              # 2. تحميل الفيديو
-              log_message("📥 Downloading video...")
+              # 1. تحميل الفيديو أولاً (كما كان يعمل سابقاً)
+              print("📥 Downloading video...")
               with open(COOKIES_FILE, "w") as f:
                   f.write(COOKIES_TEXT)
               
-              if not run_cmd(["yt-dlp", "--cookies", COOKIES_FILE, "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", TEMP_VIDEO, youtube_url]):
-                  log_message("❌ Download failed")
+              # استخدام نفس أمر التحميل الذي كان يعمل بنجاح
+              cmd = [
+                  "yt-dlp", "--cookies", COOKIES_FILE,
+                  "--js-runtime", "node",
+                  "--remote-components", "ejs:github",
+                  "-f", "bestvideo+bestaudio/best",
+                  "--merge-output-format", "mp4",
+                  "-o", TEMP_VIDEO, youtube_url
+              ]
+              
+              result = subprocess.run(cmd, capture_output=True, text=True)
+              
+              if result.returncode != 0 or not os.path.exists(TEMP_VIDEO):
+                  print(f"❌ Download failed: {result.stderr}")
                   if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
                   return False
               
               os.remove(COOKIES_FILE)
               video_duration = get_duration(TEMP_VIDEO)
-              log_message(f"📹 Duration: {seconds_to_time(video_duration)}")
+              print(f"📹 Video duration: {seconds_to_time(video_duration)}")
               
-              # 3. الحصول على الترجمة
+              # 2. استخراج الترجمة
+              print("📜 Extracting transcript...")
+              srt_cmd = [
+                  "yt-dlp", "--cookies", COOKIES_FILE,
+                  "--js-runtime", "node",
+                  "--remote-components", "ejs:github",
+                  "--skip-download",
+                  "--write-auto-sub", "--sub-lang", "ar",
+                  "--output", SUB_OUTPUT, youtube_url
+              ]
+              subprocess.run(srt_cmd, capture_output=True, text=True)
+              
               if not os.path.exists(EXPECTED_VTT):
-                  log_message("❌ Subtitle file not found")
+                  print("❌ No Arabic subtitles found for this video")
                   return False
               
-              with open(EXPECTED_VTT, "r") as f:
-                  lines = [line.strip() for line in f if line.strip() and not any(x in line for x in ['WEBVTT', 'Kind:', 'Language:', '-->'])]
-              with open(FINAL_TRANSCRIPT, "w") as f:
+              with open(EXPECTED_VTT, "r", encoding="utf-8") as vtt_f:
+                  vtt_content = vtt_f.read()
+              
+              lines = []
+              for line in vtt_content.split('\n'):
+                  line = line.strip()
+                  if line and not line.startswith('WEBVTT') and not line.startswith('Kind:') and not line.startswith('Language:') and '-->' not in line:
+                      if not lines or lines[-1] != line:
+                          lines.append(line)
+              
+              with open(FINAL_TRANSCRIPT, "w", encoding="utf-8") as f:
                   f.write('\n'.join(lines))
               
-              # 4. Gemini
-              log_message("🤖 Analyzing with Gemini...")
-              with open(FINAL_TRANSCRIPT, "r") as f:
+              # 3. Gemini AI
+              print("🤖 Sending transcript to Gemini...")
+              with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
                   transcript_data = f.read()
               
-              response = requests.post(
-                  f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}",
-                  headers={"Content-Type": "application/json"},
-                  json={"contents": [{"parts": [{"text": get_gemini_prompt(transcript_data)}]}]}
-              )
+              user_prompt = get_gemini_prompt(transcript_data)
+              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+              headers = {"Content-Type": "application/json"}
+              payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
+              
+              response = requests.post(api_url, headers=headers, json=payload, timeout=60)
               
               if response.status_code != 200:
-                  log_message(f"❌ Gemini error: {response.status_code}")
+                  print(f"❌ Gemini API Error: {response.status_code}")
                   return False
               
-              gemini_result = response.json()['candidates'][0]['content']['parts'][0]['text']
+              res_json = response.json()
+              gemini_result = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+              print("✨ Gemini analysis complete.")
               
-              # 5. استخراج المقاطع
+              # 4. استخراج المقاطع
               clips = []
               for line in gemini_result.strip().split('\n'):
                   if '|' in line:
-                      parts = [p.strip() for p in line.lstrip('• ').split('|')]
+                      line = line.lstrip('• ').strip()
+                      parts = line.split('|')
                       if len(parts) >= 3:
-                          new_start, new_end = adjust_timestamp(parts[0], parts[1], video_duration)
-                          clips.append({'start': new_start, 'end': new_end, 'title': parts[2]})
-                          log_message(f"  📍 Clip: {parts[0]}→{parts[1]} => {new_start}→{new_end}")
+                          original_start = parts[0].strip()
+                          original_end = parts[1].strip()
+                          title = parts[2].strip()
+                          new_start, new_end = adjust_timestamp(original_start, original_end, video_duration)
+                          clips.append({'start': new_start, 'end': new_end, 'title': title})
+                          print(f"  📍 Clip: {original_start}→{original_end} => {new_start}→{new_end}")
               
               if not clips:
-                  log_message("❌ No clips found")
+                  print("⚠️ No valid clips found")
                   return False
               
-              # 6. معالجة المقاطع
+              # 5. معالجة المقاطع
+              print(f"🚀 Starting processing for {len(clips)} clips...")
               for idx, clip in enumerate(clips, 1):
-                  log_message(f"\n🎬 Clip {idx}/{len(clips)}: {clip['title']}")
+                  print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']}")
                   safe_name = "".join(c for c in clip['title'] if c.isalnum() or c == ' ').replace(' ', '_')[:100]
                   raw_clip = f"raw_{idx}.mp4"
                   vad_clip = f"vad_{idx}.mp4"
@@ -651,23 +616,23 @@ jobs:
                   output_path = f"{idx:02d}_{safe_name}.mp4"
                   
                   if not extract_clip(TEMP_VIDEO, clip['start'], clip['end'], raw_clip):
-                      log_message("  ❌ Cut failed")
+                      print("  ❌ Cut failed")
                       continue
                   
                   remove_silence_from_video(raw_clip, vad_clip)
                   
                   if not create_image_with_title(clip['title'], img_path):
-                      log_message("  ❌ Image creation failed")
+                      print("  ❌ Image creation failed")
                       continue
                   
                   if process_tiktok_reel(vad_clip, img_path, output_path):
-                      log_message(f"  ✅ Merged successfully")
+                      size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                      print(f"  ✅ Merged successfully ({size_mb:.1f}MB)")
                       send_video(output_path, clip['title'])
-                      
                       scheduled = add_to_schedule(clip['title'], output_path, idx)
                       upload_to_youtube(output_path, clip['title'], scheduled["publish_time"])
                   else:
-                      log_message("  ❌ Merge failed")
+                      print("  ❌ Merge failed")
                   
                   for f in [raw_clip, vad_clip, img_path, output_path]:
                       if os.path.exists(f): os.remove(f)
@@ -676,53 +641,51 @@ jobs:
               return True
 
           # ========== التشغيل ==========
-          log_message("="*60)
-          log_message("YouTube Ultimate QA Extractor - Daily Schedule Mode")
-          log_message(f"Run at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-          log_message("="*60)
+          print("="*60)
+          print("YouTube Ultimate QA Extractor - Daily Schedule")
+          print("="*60)
           
           # التحقق من المتطلبات
           if not GITHUB_TOKEN:
-              log_message("❌ GITHUB_TOKEN not found!")
+              print("❌ GITHUB_TOKEN not found!")
               sys.exit(1)
           
           if not COOKIES_TEXT:
-              log_message("❌ COOKIES_TEXT not found!")
+              print("❌ COOKIES_TEXT not found!")
               sys.exit(1)
           
           if not GEMINI_KEY:
-              log_message("❌ GEMINI_API_KEY not found!")
+              print("❌ GEMINI_API_KEY not found!")
               sys.exit(1)
           
           # الحصول على أول رابط
           first_url, remaining_urls, file_sha = get_first_url()
           
           if not first_url:
-              log_message("✅ No videos to process today")
+              print("✅ No videos to process")
               sys.exit(0)
           
           # معالجة الفيديو
-          log_message(f"\n🚀 Processing: {first_url}")
+          print(f"\n🚀 Processing: {first_url}")
           success = process_video(first_url)
           
           # حذف الرابط فقط إذا نجحت المعالجة بالكامل
           if success:
               if update_videos_file(remaining_urls, file_sha):
-                  log_message(f"\n✅ Video processed successfully and removed from list!")
+                  print(f"\n✅ Video processed successfully and removed from list!")
               else:
-                  log_message(f"\n⚠️ Video processed but failed to update list")
+                  print(f"\n⚠️ Video processed but failed to update list")
           else:
-              log_message(f"\n❌ Video processing failed. URL remains in videos.txt")
-              log_message("⚠️ Please check the video manually")
+              print(f"\n❌ Video processing failed. URL remains in videos.txt")
               sys.exit(1)
           
           # عرض حالة الجدولة
           schedule = load_schedule()
-          log_message(f"\n📊 Schedule Status:")
-          log_message(f"   - Scheduled videos: {len(schedule.get('scheduled_videos', []))}")
+          print(f"\n📊 Schedule Status:")
+          print(f"   - Scheduled videos: {len(schedule.get('scheduled_videos', []))}")
           if schedule.get('scheduled_videos'):
-              log_message("\n📅 Next scheduled videos:")
+              print("\n📅 Next scheduled videos:")
               for v in schedule['scheduled_videos'][:3]:
-                  log_message(f"   - {v['title']} at {v['publish_time']}")
+                  print(f"   - {v['title']} at {v['publish_time']}")
           
-          log_message("\n🏁 Daily job completed successfully!")
+          print("\n🏁 Daily job completed!")
