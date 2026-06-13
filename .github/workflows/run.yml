@@ -85,7 +85,7 @@ jobs:
           YOUTUBE_REFRESH_TOKEN = os.environ.get('YOUTUBE_REFRESH_TOKEN', '')
           
           VIDEOS_FILE_PATH = "videos.txt"
-          LAST_PUBLISH_FILE = "last_publish.json"  # ملف بسيط لحفظ آخر وقت نشر
+          LAST_PUBLISH_FILE = "last_publish.json"
           BASE_DIR = os.getcwd()
           TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
           COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
@@ -93,10 +93,10 @@ jobs:
           EXPECTED_VTT = os.path.join(BASE_DIR, "sub_file.ar.vtt")
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
 
-          # أوقات النشر (بالتوقيت العالمي UTC) - تقابل توقيت الجزائر UTC+1
-          PUBLISH_HOURS = [11, 14, 17, 20, 22]  # 12, 15, 18, 21, 23 بتوقيت الجزائر
+          # أوقات النشر (بالتوقيت العالمي UTC)
+          PUBLISH_HOURS = [11, 14, 17, 20, 22]
 
-          # الحد الأقصى لمدة المقطع (3 دقائق = 180 ثانية)
+          # الحد الأقصى لمدة المقطع (3 دقائق)
           MAX_CLIP_DURATION = 180
 
           # إعدادات الصور والخطوط
@@ -125,7 +125,6 @@ jobs:
 
           # ========== دوال حفظ آخر وقت نشر ==========
           def load_last_publish():
-              """تحميل آخر وقت نشر من ملف JSON"""
               if os.path.exists(LAST_PUBLISH_FILE):
                   try:
                       with open(LAST_PUBLISH_FILE, 'r', encoding='utf-8') as f:
@@ -136,19 +135,15 @@ jobs:
               return None
 
           def save_last_publish(publish_time_str):
-              """حفظ آخر وقت نشر في ملف JSON"""
               data = {
                   "last_publish_time": publish_time_str,
                   "last_updated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
               }
               with open(LAST_PUBLISH_FILE, 'w', encoding='utf-8') as f:
                   json.dump(data, f, indent=2, ensure_ascii=False)
-              
-              # رفع الملف إلى GitHub
               upload_last_publish_to_github()
 
           def upload_last_publish_to_github():
-              """رفع ملف آخر وقت نشر إلى GitHub"""
               if not GITHUB_TOKEN or not REPO_NAME:
                   return
               
@@ -161,7 +156,6 @@ jobs:
               with open(LAST_PUBLISH_FILE, 'r', encoding='utf-8') as f:
                   content = f.read()
               
-              # الحصول على SHA الحالي
               response = requests.get(url, headers=headers)
               current_sha = None
               if response.status_code == 200:
@@ -181,24 +175,20 @@ jobs:
                   print(f"⚠️ Failed to upload: {e}")
 
           def get_next_publish_time():
-              """الحصول على وقت النشر التالي بناءً على آخر وقت نشر"""
               last_publish = load_last_publish()
               now = datetime.datetime.now(datetime.timezone.utc)
               
               if last_publish:
-                  # تحويل آخر وقت نشر إلى datetime
                   last_time = datetime.datetime.strptime(last_publish, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
                   last_hour = last_time.hour
                   last_date = last_time.date()
                   
-                  # البحث عن الساعة التالية
                   try:
                       current_index = PUBLISH_HOURS.index(last_hour)
                       next_index = current_index + 1
                   except ValueError:
                       next_index = 0
                   
-                  # إذا وصلنا إلى نهاية اليوم
                   if next_index >= len(PUBLISH_HOURS):
                       next_date = last_date + datetime.timedelta(days=1)
                       next_hour = PUBLISH_HOURS[0]
@@ -208,7 +198,6 @@ jobs:
                   
                   publish_time = datetime.datetime.combine(next_date, datetime.time(next_hour, 0, tzinfo=datetime.timezone.utc))
                   
-                  # إذا كان الوقت المحسوب في الماضي (بسبب تأخير)، انتقل للساعة التالية
                   while publish_time <= now:
                       try:
                           current_index = PUBLISH_HOURS.index(publish_time.hour)
@@ -222,7 +211,6 @@ jobs:
                           publish_time = datetime.datetime.combine(publish_time.date(), datetime.time(PUBLISH_HOURS[next_index], 0, tzinfo=datetime.timezone.utc))
                   
               else:
-                  # أول مرة: ابدأ من أقرب وقت قادم
                   now_hour = now.hour
                   now_date = now.date()
                   
@@ -240,11 +228,9 @@ jobs:
                   
                   publish_time = datetime.datetime.combine(next_date, datetime.time(next_hour, 0, tzinfo=datetime.timezone.utc))
               
-              # حفظ هذا الوقت كآخر وقت مجدول (سيتم تحديثه بعد الرفع الفعلي)
               return publish_time
 
           def update_last_publish(publish_time):
-              """تحديث آخر وقت نشر بعد رفع الفيديو بنجاح"""
               save_last_publish(publish_time.strftime("%Y-%m-%dT%H:%M:%SZ"))
               algiers_time = publish_time + datetime.timedelta(hours=1)
               print(f"✅ Updated last publish time to: {algiers_time.strftime('%H:%M')} (توقيت الجزائر)")
@@ -627,49 +613,102 @@ jobs:
                   print(f"❌ YouTube error: {e}")
               return None
 
-          # ========== دوال Gemini ==========
-          def get_gemini_prompt(transcript):
-              return f"""الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية.
+          # ========== دوال Gemini مع تقسيم النص ==========
+          def split_transcript(transcript, max_chars=15000):
+              """تقسيم النص الطويل إلى أجزاء متعددة"""
+              if len(transcript) <= max_chars:
+                  return [transcript]
+              
+              parts = []
+              lines = transcript.split('\n')
+              current_part = []
+              current_length = 0
+              
+              for line in lines:
+                  line_length = len(line) + 1
+                  if current_length + line_length > max_chars and current_part:
+                      parts.append('\n'.join(current_part))
+                      current_part = [line]
+                      current_length = line_length
+                  else:
+                      current_part.append(line)
+                      current_length += line_length
+              
+              if current_part:
+                  parts.append('\n'.join(current_part))
+              
+              print(f"📊 Transcript split into {len(parts)} parts for processing")
+              return parts
 
-          استخرج جميع الأسئلة والإجابات بهذا التنسيق:
+          def extract_clips_from_part(part_text, part_index, total_parts):
+              """إرسال جزء من النص إلى Gemini واستخراج المواقيت"""
+              user_prompt = f"""الوثيقة هي جزء {part_index + 1} من {total_parts} من نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية.
+
+          استخرج جميع الأسئلة والإجابات في هذا الجزء فقط بهذا التنسيق:
           • START_TIME | END_TIME | عنوان السؤال (حد أقصى 10 كلمات)
 
           استخدم تنسيق MM:SS للأوقات.
-          ابدأ الإخراج مباشرة.
+          إذا كان السؤال غير مكتمل في هذا الجزء، لا تستخرجه.
+          ابدأ الإخراج مباشرة بدون أي مقدمة.
 
           النص:
-          {transcript}"""
-
-          def send_to_gemini(text, max_retries=3):
+          {part_text}"""
+              
               api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
               headers = {"Content-Type": "application/json"}
-              
-              if len(text) > 25000:
-                  text = text[:25000]
-                  print("⚠️ Transcript truncated to 25000 characters")
-              
-              user_prompt = get_gemini_prompt(text)
               payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
               
-              for attempt in range(max_retries):
+              for attempt in range(3):
                   try:
-                      print(f"📡 Sending to Gemini (attempt {attempt + 1}/{max_retries})...")
+                      print(f"  📡 Processing part {part_index + 1}/{total_parts} (attempt {attempt + 1})...")
                       response = requests.post(api_url, headers=headers, json=payload, timeout=180)
                       
                       if response.status_code == 200:
                           res_json = response.json()
-                          return res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                          result = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                          return result
                       else:
-                          print(f"⚠️ Gemini error {response.status_code}, retrying...")
+                          print(f"  ⚠️ Error {response.status_code}, retrying...")
                           time.sleep(5)
-                  except requests.exceptions.Timeout:
-                      print(f"⚠️ Timeout on attempt {attempt + 1}, retrying...")
-                      time.sleep(10)
                   except Exception as e:
-                      print(f"⚠️ Error: {e}, retrying...")
+                      print(f"  ⚠️ Error: {e}, retrying...")
                       time.sleep(5)
               
-              return None
+              return ""
+
+          def merge_clips_results(results):
+              """دمج نتائج الأجزاء المختلفة وإزالة التكرارات"""
+              all_clips = []
+              seen_times = set()
+              
+              for result in results:
+                  for line in result.strip().split('\n'):
+                      if '|' in line:
+                          line = line.lstrip('• ').strip()
+                          parts = line.split('|')
+                          if len(parts) >= 3:
+                              start_time = parts[0].strip()
+                              end_time = parts[1].strip()
+                              title = parts[2].strip()
+                              
+                              if start_time not in seen_times:
+                                  seen_times.add(start_time)
+                                  all_clips.append({
+                                      'start': start_time,
+                                      'end': end_time,
+                                      'title': title
+                                  })
+              
+              def time_to_seconds_sort(t):
+                  parts = t.split(':')
+                  if len(parts) == 2:
+                      return int(parts[0]) * 60 + int(parts[1])
+                  elif len(parts) == 3:
+                      return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                  return 0
+              
+              all_clips.sort(key=lambda x: time_to_seconds_sort(x['start']))
+              return all_clips
 
           # ========== المعالجة الرئيسية ==========
           def process_video(youtube_url):
@@ -724,7 +763,6 @@ jobs:
               except Exception as e:
                   print(f"❌ VTT Extraction failed: {e}")
               
-              # حذف الكوكيز بعد الانتهاء
               if os.path.exists(COOKIES_FILE):
                   os.remove(COOKIES_FILE)
               
@@ -732,7 +770,7 @@ jobs:
                   print("❌ Transcript not found!")
                   return False
               
-              # 4. Gemini AI
+              # 4. Gemini AI - معالجة النص الطويل بتقسيمه
               if not GEMINI_KEY:
                   print("❌ GEMINI_API_KEY missing!")
                   return False
@@ -742,57 +780,75 @@ jobs:
               with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
                   transcript_data = f.read()
               
-              if len(transcript_data) > 20000:
-                  transcript_data = transcript_data[:20000]
-                  print(f"⚠️ Transcript truncated to 20000 characters")
+              print(f"📄 Transcript length: {len(transcript_data)} characters")
               
-              gemini_result = send_to_gemini(transcript_data)
+              # تقسيم النص الطويل إلى أجزاء
+              transcript_parts = split_transcript(transcript_data, max_chars=15000)
               
-              if not gemini_result:
-                  print("❌ Gemini failed after retries")
+              # معالجة كل جزء على حدة
+              part_results = []
+              for idx, part in enumerate(transcript_parts):
+                  result = extract_clips_from_part(part, idx, len(transcript_parts))
+                  if result:
+                      part_results.append(result)
+                  time.sleep(2)
+              
+              if not part_results:
+                  print("❌ Gemini failed to extract any clips")
                   return False
               
-              print("✨ Gemini analysis complete.")
+              # دمج النتائج
+              clips = merge_clips_results(part_results)
               
-              # 5. استخراج المقاطع وتصفيتها حسب المدة
-              clips = []
+              if not clips:
+                  print("⚠️ No clips extracted from transcript")
+                  return False
+              
+              print(f"✨ Gemini extracted {len(clips)} clips from {len(transcript_parts)} parts")
+              
+              # 5. تعديل التوقيتات وتصفية المقاطع الطويلة
+              valid_clips = []
               skipped_count = 0
-              for line in gemini_result.strip().split('\n'):
-                  if '|' in line:
-                      line = line.lstrip('• ').strip()
-                      parts = line.split('|')
-                      if len(parts) >= 3:
-                          original_start = parts[0].strip()
-                          original_end = parts[1].strip()
-                          title = parts[2].strip()
-                          new_start, new_end = adjust_timestamp(original_start, original_end, video_duration)
-                          
-                          start_sec = time_to_seconds(new_start)
-                          end_sec = time_to_seconds(new_end)
-                          duration_sec = end_sec - start_sec
-                          
-                          if duration_sec > MAX_CLIP_DURATION:
-                              print(f"  ⏭️ Skipping clip (duration {duration_sec:.0f}s > {MAX_CLIP_DURATION}s): {title}")
-                              skipped_count += 1
-                              continue
-                          
-                          clips.append({'start': new_start, 'end': new_end, 'title': title, 'duration': duration_sec})
-                          print(f"  📍 Clip: {original_start}→{original_end} => {new_start}→{new_end} ({duration_sec:.0f}s)")
+              
+              for clip in clips:
+                  original_start = clip['start']
+                  original_end = clip['end']
+                  title = clip['title']
+                  
+                  new_start, new_end = adjust_timestamp(original_start, original_end, video_duration)
+                  
+                  start_sec = time_to_seconds(new_start)
+                  end_sec = time_to_seconds(new_end)
+                  duration_sec = end_sec - start_sec
+                  
+                  if duration_sec > MAX_CLIP_DURATION:
+                      print(f"  ⏭️ Skipping clip (duration {duration_sec:.0f}s > {MAX_CLIP_DURATION}s): {title}")
+                      skipped_count += 1
+                      continue
+                  
+                  valid_clips.append({
+                      'start': new_start, 
+                      'end': new_end, 
+                      'title': title, 
+                      'duration': duration_sec,
+                      'original_start': original_start,
+                      'original_end': original_end
+                  })
+                  print(f"  📍 Clip: {original_start}→{original_end} => {new_start}→{new_end} ({duration_sec:.0f}s)")
               
               if skipped_count > 0:
                   print(f"⚠️ Skipped {skipped_count} clip(s) because they exceeded {MAX_CLIP_DURATION}s limit")
               
-              if not clips:
-                  print("⚠️ No valid clips found")
+              if not valid_clips:
+                  print("⚠️ No valid clips found after filtering")
                   return False
               
-              # 6. معالجة المقاطع ورفعها مباشرة (كل مقطع في وقته المحدد)
-              print(f"🚀 Starting processing for {len(clips)} clips...")
+              # 6. معالجة المقاطع ورفعها مباشرة
+              print(f"🚀 Starting processing for {len(valid_clips)} clips...")
               
-              for idx, clip in enumerate(clips, 1):
-                  print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']} ({clip['duration']:.0f}s)")
+              for idx, clip in enumerate(valid_clips, 1):
+                  print(f"\n🎬 Processing Clip {idx}/{len(valid_clips)}: {clip['title']} ({clip['duration']:.0f}s)")
                   
-                  # الحصول على وقت النشر التالي لهذا المقطع
                   publish_time = get_next_publish_time()
                   algiers_time = publish_time + datetime.timedelta(hours=1)
                   print(f"  📅 Scheduled for: {algiers_time.strftime('%H:%M')} (توقيت الجزائر)")
@@ -817,13 +873,8 @@ jobs:
                       size_mb = os.path.getsize(output_path) / (1024 * 1024)
                       print(f"  ✅ Merged successfully ({size_mb:.1f}MB)")
                       
-                      # إرسال إلى تليجرام
                       send_video(output_path, clip['title'])
-                      
-                      # رفع إلى YouTube مع وقت النشر المحدد
                       upload_to_youtube(output_path, clip['title'], publish_time)
-                      
-                      # تحديث آخر وقت نشر (بعد رفع الفيديو)
                       update_last_publish(publish_time)
                   else:
                       print("  ❌ Merge failed")
@@ -840,7 +891,6 @@ jobs:
           print(f"Max clip duration: {MAX_CLIP_DURATION} seconds (3 minutes)")
           print("="*60)
           
-          # عرض آخر وقت نشر
           last_publish = load_last_publish()
           if last_publish:
               last_time = datetime.datetime.strptime(last_publish, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
@@ -849,7 +899,6 @@ jobs:
           else:
               print("📅 No previous publish time found. Starting fresh.")
           
-          # التحقق من المتطلبات
           if not GITHUB_TOKEN:
               print("❌ GITHUB_TOKEN not found!")
               sys.exit(1)
@@ -862,18 +911,15 @@ jobs:
               print("❌ GEMINI_API_KEY not found!")
               sys.exit(1)
           
-          # الحصول على أول رابط
           first_url, remaining_urls, file_sha = get_first_url()
           
           if not first_url:
               print("✅ No videos to process")
               sys.exit(0)
           
-          # معالجة الفيديو
           print(f"\n🚀 Processing: {first_url}")
           success = process_video(first_url)
           
-          # حذف الرابط فقط إذا نجحت المعالجة بالكامل
           if success:
               if update_videos_file(remaining_urls, file_sha):
                   print(f"\n✅ Video processed successfully and removed from list!")
@@ -883,7 +929,6 @@ jobs:
               print(f"\n❌ Video processing failed. URL remains in videos.txt")
               sys.exit(1)
           
-          # عرض آخر وقت نشر بعد الانتهاء
           last_publish = load_last_publish()
           if last_publish:
               last_time = datetime.datetime.strptime(last_publish, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
