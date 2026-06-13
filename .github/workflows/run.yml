@@ -3,21 +3,21 @@ name: YouTube Ultimate QA Extractor
 on:
   workflow_dispatch:
     inputs:
-      youtube_url:
-        description: 'YouTube Video URL'
-        required: true
-        default: 'https://youtu.be/NdVhKakgGHM'
       telegram_target:
         description: 'Telegram Channel/User ID'
         required: true
         default: '-1004447957881'
 
 jobs:
-  process:
+  process-all-videos:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -29,16 +29,20 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg fontconfig build-essential python3-dev
           npm install -g sharp-cli
-          pip install yt-dlp requests webrtcvad-wheels
+          pip install yt-dlp requests webrtcvad-wheels telethon google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
           pip install --upgrade pip
           pip install --upgrade yt-dlp
 
-      - name: Process Video, Transcript & Gemini Requests API
+      - name: Batch Process Videos
         env:
-          YT_URL: ${{ github.event.inputs.youtube_url }}
           TG_TARGET: ${{ github.event.inputs.telegram_target }}
           COOKIES_TEXT: ${{ secrets.COOKIES_TEXT }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_NAME: ${{ github.repository }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
         shell: python
         run: |
           import os
@@ -51,15 +55,34 @@ jobs:
           import json
           import urllib.request
           import re
+          import asyncio
+          import datetime
           from typing import List, Tuple
+          from telethon import TelegramClient
+          from github import Github
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+          from google.auth.transport.requests import Request as AuthRequest
+          from google.oauth2.credentials import Credentials
 
+          # ========== الإعدادات ==========
           BOT_TOKEN = "8248329215:AAGl3C96vZQ0B9VuDTX2m7IQt--WHDXJmFI"
+          TELEGRAM_API_ID = 24629594
+          TELEGRAM_API_HASH = "a79fa760e65af09a85eb2cc97cb2263c"
+          TELEGRAM_BOT_TOKEN = "8853762125:AAEJeYtDufaLoQcq8ZbuHpuQ3R42WYJkBXo"
           
-          YT_URL = os.environ['YT_URL']
-          TG_TARGET = os.environ['TG_TARGET']
+          TG_TARGET = os.environ.get('TG_TARGET', '')
           COOKIES_TEXT = os.environ.get('COOKIES_TEXT', '')
           GEMINI_KEY = os.environ.get('GEMINI_API_KEY', '')
-
+          GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
+          REPO_NAME = os.environ.get('REPO_NAME')
+          
+          YOUTUBE_CLIENT_ID = os.environ.get('YOUTUBE_CLIENT_ID', '')
+          YOUTUBE_CLIENT_SECRET = os.environ.get('YOUTUBE_CLIENT_SECRET', '')
+          YOUTUBE_REFRESH_TOKEN = os.environ.get('YOUTUBE_REFRESH_TOKEN', '')
+          
+          VIDEOS_FILE_PATH = "videos.txt"
+          SCHEDULE_FILE_PATH = "schedule.json"
           BASE_DIR = os.getcwd()
           TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
           COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
@@ -67,254 +90,303 @@ jobs:
           EXPECTED_VTT = os.path.join(BASE_DIR, "sub_file.ar.vtt")
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
 
-          # Assets settings
+          # أوقات النشر (بالتوقيت العالمي UTC)
+          PUBLISH_HOURS = [12, 15, 18, 21, 23]  # 5 مواعيد يومياً
+
+          # إعدادات الصور والخطوط
           FONT_SYSTEM_DIR = os.path.expanduser("~/.local/share/fonts")
           IMAGES_CACHE_DIR = os.path.expanduser("~/.local/share/images")
-          FONT_NAME = "ReadexPro-Bold.ttf"
-          FONT_FULL_PATH = os.path.join(FONT_SYSTEM_DIR, FONT_NAME)
-
+          FONT_FULL_PATH = os.path.join(FONT_SYSTEM_DIR, "ReadexPro-Bold.ttf")
           BACKGROUND_SHORT_URL = "https://raw.githubusercontent.com/bidjadraft/markdown/refs/heads/main/images/background1.png"
           BACKGROUND_LONG_URL = "https://raw.githubusercontent.com/bidjadraft/markdown/refs/heads/main/images/background.png"
           FONT_URL = "https://raw.githubusercontent.com/bidjadraft/markdown/refs/heads/main/fonts/ReadexPro-Bold.ttf"
-
+          
           os.makedirs(IMAGES_CACHE_DIR, exist_ok=True)
           os.makedirs(FONT_SYSTEM_DIR, exist_ok=True)
-
           CACHED_FONT = os.path.join(IMAGES_CACHE_DIR, "ReadexPro-Bold.ttf")
           CACHED_BG_SHORT = os.path.join(IMAGES_CACHE_DIR, "background1.png")
           CACHED_BG_LONG = os.path.join(IMAGES_CACHE_DIR, "background.png")
 
-          # Video/Audio settings
+          # إعدادات المعالجة
           AUDIO_BITRATE = "96k"
           VIDEO_PRESET = "faster"
           VIDEO_CRF = 20
           SILENCE_THRESHOLD = 0.5
           VAD_AGGRESSIVENESS = 3
-          
-          # Timing offsets
-          START_OFFSET = -3  # Add 3 seconds to start
-          END_OFFSET = 5     # Add 5 seconds to end
+          START_OFFSET = -3
+          END_OFFSET = 5
+          TELEGRAM_LIMIT = 20 * 1024 * 1024
 
-          def tg_msg(text):
-              try:
-                  url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-                  requests.post(url, json={"chat_id": int(TG_TARGET), "text": text}, timeout=15)
-              except: pass
+          # ========== دوال إدارة الجدولة ==========
+          def load_schedule():
+              """تحميل ملف الجدولة، وإنشائه إذا لم يكن موجوداً"""
+              if os.path.exists(SCHEDULE_FILE_PATH):
+                  try:
+                      with open(SCHEDULE_FILE_PATH, 'r', encoding='utf-8') as f:
+                          return json.load(f)
+                  except:
+                      pass
+              
+              # إنشاء ملف جدولة جديد
+              now = datetime.datetime.now(datetime.timezone.utc)
+              schedule = {
+                  "last_updated": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "current_day_index": 0,
+                  "current_hour_index": 0,
+                  "scheduled_videos": [],
+                  "published_videos": []
+              }
+              save_schedule(schedule)
+              return schedule
 
-          def tg_send_video(filepath, caption):
+          def save_schedule(schedule):
+              """حفظ ملف الجدولة"""
+              schedule["last_updated"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+              with open(SCHEDULE_FILE_PATH, 'w', encoding='utf-8') as f:
+                  json.dump(schedule, f, indent=2, ensure_ascii=False)
+              # رفع الملف إلى GitHub
+              upload_schedule_to_github()
+
+          def upload_schedule_to_github():
+              """رفع ملف الجدولة إلى GitHub"""
+              if not GITHUB_TOKEN or not REPO_NAME:
+                  return
               try:
-                  url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
-                  with open(filepath, 'rb') as video:
-                      files = {'video': video}
-                      # Use simplified caption
-                      data = {'chat_id': int(TG_TARGET), 'caption': caption, 'supports_streaming': True}
-                      response = requests.post(url, data=data, files=files, timeout=120)
-                      if response.status_code == 200:
-                          print(f"✅ Video sent successfully: {filepath}")
-                          return True
-                      else:
-                          print(f"❌ Failed to send video: {response.text}")
-                          return False
+                  g = Github(GITHUB_TOKEN)
+                  repo = g.get_repo(REPO_NAME)
+                  with open(SCHEDULE_FILE_PATH, 'r', encoding='utf-8') as f:
+                      content = f.read()
+                  
+                  try:
+                      # محاولة تحديث الملف إذا كان موجوداً
+                      contents = repo.get_contents(SCHEDULE_FILE_PATH)
+                      repo.update_file(SCHEDULE_FILE_PATH, "Update schedule", content, contents.sha)
+                  except:
+                      # إنشاء الملف إذا لم يكن موجوداً
+                      repo.create_file(SCHEDULE_FILE_PATH, "Create schedule file", content)
+                  print(f"✅ Schedule saved to GitHub")
               except Exception as e:
-                  print(f"⚠️ Send video error: {e}")
-                  return False
+                  print(f"⚠️ Failed to upload schedule: {e}")
+
+          def get_next_schedule_time():
+              """الحصول على موعد النشر التالي بناءً على الجدولة"""
+              schedule = load_schedule()
+              now = datetime.datetime.now(datetime.timezone.utc)
+              
+              # إذا كان هناك فيديوهات مجدولة مسبقاً، استخدم أولها
+              if schedule.get("scheduled_videos"):
+                  first_scheduled = schedule["scheduled_videos"][0]
+                  scheduled_time = datetime.datetime.strptime(first_scheduled["publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+                  if scheduled_time > now:
+                      return scheduled_time, first_scheduled
+              
+              # حساب الموعد التالي من الصفر
+              day_offset = schedule.get("current_day_index", 0)
+              hour_offset = schedule.get("current_hour_index", 0)
+              
+              # بدء من اليوم الحالي
+              target_date = now.date()
+              
+              # إذا كان اليوم الحالي قد تجاوز عدد الساعات المتبقية، انتقل لليوم التالي
+              if hour_offset >= len(PUBLISH_HOURS):
+                  hour_offset = 0
+                  day_offset += 1
+                  target_date += datetime.timedelta(days=day_offset)
+              
+              # الحصول على ساعة النشر
+              target_hour = PUBLISH_HOURS[hour_offset]
+              
+              # إنشاء وقت النشر
+              publish_time = datetime.datetime.combine(target_date, datetime.time(target_hour, 0, tzinfo=datetime.timezone.utc))
+              
+              # إذا كان الوقت قد مضى، انتقل للساعة التالية
+              if publish_time <= now:
+                  hour_offset += 1
+                  if hour_offset >= len(PUBLISH_HOURS):
+                      hour_offset = 0
+                      day_offset += 1
+                      target_date += datetime.timedelta(days=day_offset)
+                      publish_time = datetime.datetime.combine(target_date, datetime.time(PUBLISH_HOURS[0], 0, tzinfo=datetime.timezone.utc))
+                  else:
+                      publish_time = datetime.datetime.combine(target_date, datetime.time(PUBLISH_HOURS[hour_offset], 0, tzinfo=datetime.timezone.utc))
+              
+              # تحديث الجدولة
+              schedule["current_day_index"] = day_offset
+              schedule["current_hour_index"] = hour_offset + 1 if hour_offset + 1 < len(PUBLISH_HOURS) else 0
+              if hour_offset + 1 >= len(PUBLISH_HOURS):
+                  schedule["current_day_index"] = day_offset + 1
+              
+              save_schedule(schedule)
+              
+              return publish_time, None
+
+          def add_to_schedule(video_title, video_path, clip_index):
+              """إضافة فيديو إلى جدولة النشر"""
+              schedule = load_schedule()
+              publish_time, _ = get_next_schedule_time()
+              
+              scheduled_video = {
+                  "id": f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{clip_index}",
+                  "title": video_title,
+                  "video_path": video_path,
+                  "publish_time": publish_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "status": "scheduled"
+              }
+              
+              schedule["scheduled_videos"].append(scheduled_video)
+              save_schedule(schedule)
+              
+              print(f"📅 Scheduled: {video_title} at {scheduled_video['publish_time']}")
+              return scheduled_video
+
+          def get_videos_to_publish():
+              """الحصول على الفيديوهات التي حان وقت نشرها"""
+              schedule = load_schedule()
+              now = datetime.datetime.now(datetime.timezone.utc)
+              
+              to_publish = []
+              remaining = []
+              
+              for video in schedule.get("scheduled_videos", []):
+                  publish_time = datetime.datetime.strptime(video["publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+                  if publish_time <= now:
+                      to_publish.append(video)
+                  else:
+                      remaining.append(video)
+              
+              schedule["scheduled_videos"] = remaining
+              save_schedule(schedule)
+              
+              return to_publish
+
+          def mark_as_published(video):
+              """تحديد فيديو كمنشور"""
+              schedule = load_schedule()
+              video["status"] = "published"
+              video["published_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+              schedule["published_videos"].append(video)
+              save_schedule(schedule)
+
+          # ========== دوال التحميل الأساسية ==========
+          def download_file(url, dest):
+              if os.path.exists(dest): return True
+              try: urllib.request.urlretrieve(url, dest); return True
+              except: return False
+
+          try:
+              download_file(FONT_URL, CACHED_FONT)
+              download_file(BACKGROUND_SHORT_URL, CACHED_BG_SHORT)
+              download_file(BACKGROUND_LONG_URL, CACHED_BG_LONG)
+              if not os.path.exists(FONT_FULL_PATH):
+                  shutil.copy2(CACHED_FONT, FONT_FULL_PATH)
+                  subprocess.run(['fc-cache', '-fv'], capture_output=True)
+          except Exception as e: print(f"⚠️ Assets warning: {e}")
 
           def get_duration(file_path: str) -> float:
               try:
-                  cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
-                         '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
+                  cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
                   result = subprocess.run(cmd, capture_output=True, text=True)
                   return float(result.stdout.strip()) if result.stdout.strip() else 0.0
-              except:
-                  return 0.0
+              except: return 0.0
 
           def run_cmd(cmd):
               try:
-                  if isinstance(cmd, list):
-                      result = subprocess.run(cmd, capture_output=True, text=True)
-                  else:
-                      result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
+                  result = subprocess.run(cmd, capture_output=True, text=True)
                   return result.returncode == 0
-              except:
-                  return False
+              except: return False
 
           def seconds_to_time(seconds: float) -> str:
-              minutes = int(seconds // 60)
-              secs = int(seconds % 60)
-              if minutes >= 60:
-                  hours = minutes // 60
-                  minutes = minutes % 60
-                  return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+              minutes = int(seconds // 60); secs = int(seconds % 60)
+              if minutes >= 60: hours = minutes // 60; minutes = minutes % 60; return f"{hours:02d}:{minutes:02d}:{secs:02d}"
               return f"{minutes:02d}:{secs:02d}"
 
           def time_to_seconds(time_str: str) -> float:
-              """Convert time format to seconds (supports MM:SS, MM:SS.mmm, HH:MM:SS, HH:MM:SS.mmm)"""
               time_str = time_str.strip()
-              
-              # Remove milliseconds if present
-              if '.' in time_str:
-                  time_str = time_str.split('.')[0]
-              
+              if '.' in time_str: time_str = time_str.split('.')[0]
               parts = time_str.split(':')
-              if len(parts) == 2:  # MM:SS
-                  minutes, seconds = map(int, parts)
-                  return minutes * 60 + seconds
-              elif len(parts) == 3:  # HH:MM:SS
-                  hours, minutes, seconds = map(int, parts)
-                  return hours * 3600 + minutes * 60 + seconds
+              if len(parts) == 2: return int(parts[0]) * 60 + int(parts[1])
+              elif len(parts) == 3: return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
               return 0.0
 
           def adjust_timestamp(start_time: str, end_time: str, video_duration: float) -> Tuple[str, str]:
-              """Expand clip by adding START_OFFSET and END_OFFSET"""
-              start_sec = time_to_seconds(start_time) + START_OFFSET
-              end_sec = time_to_seconds(end_time) + END_OFFSET
-              
-              # Clamp to video boundaries
-              start_sec = max(0, start_sec)
-              end_sec = min(video_duration, end_sec)
-              
-              # Ensure end is after start
-              if end_sec <= start_sec:
-                  end_sec = start_sec + 1
-              
+              start_sec = max(0, time_to_seconds(start_time) + START_OFFSET)
+              end_sec = min(video_duration, time_to_seconds(end_time) + END_OFFSET)
+              if end_sec <= start_sec: end_sec = start_sec + 1
               return seconds_to_time(start_sec), seconds_to_time(end_sec)
 
+          # ========== دوال قص وإزالة الصمت ==========
           def extract_clip(video_path: str, start: str, end: str, output_path: str) -> bool:
-              return run_cmd([
-                  'ffmpeg', '-y',
-                  '-i', video_path,
-                  '-ss', start,
-                  '-to', end,
-                  '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', str(VIDEO_CRF),
-                  '-c:a', 'aac', '-b:a', AUDIO_BITRATE,
-                  '-loglevel', 'error',
-                  output_path
-              ])
-
-          # Silence removal functions
-          def merge_segments(segments: List, threshold: float) -> List[Tuple[float, float]]:
-              if not segments:
-                  return []
-              merged = []
-              cs, ce = segments[0]
-              for ns, ne in segments[1:]:
-                  if ns - ce <= threshold:
-                      ce = max(ce, ne)
-                  else:
-                      merged.append((cs, ce))
-                      cs, ce = ns, ne
-              merged.append((cs, ce))
-              return [(s, e) for s, e in merged if e - s > 0.5]
+              return run_cmd(['ffmpeg', '-y', '-i', video_path, '-ss', start, '-to', end, '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', str(VIDEO_CRF), '-c:a', 'aac', '-b:a', AUDIO_BITRATE, '-loglevel', 'error', output_path])
 
           def remove_silence_from_video(input_path: str, output_path: str) -> Tuple[bool, float]:
               try:
                   import webrtcvad
                   vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
               except ImportError:
-                  shutil.copy2(input_path, output_path)
-                  return True, 0.0
+                  shutil.copy2(input_path, output_path); return True, 0.0
               
               orig_duration = get_duration(input_path)
-              
               with tempfile.TemporaryDirectory() as temp_dir:
                   temp_audio = os.path.join(temp_dir, "audio.wav")
+                  if not run_cmd(['ffmpeg', '-y', '-i', input_path, '-ar', '16000', '-ac', '1', temp_audio, '-loglevel', 'quiet']): return False, 0.0
                   
-                  if not run_cmd(['ffmpeg', '-y', '-i', input_path, '-ar', '16000', '-ac', '1', temp_audio, '-loglevel', 'quiet']):
-                      return False, 0.0
+                  with wave.open(temp_audio, 'rb') as wav:
+                      rate = wav.getframerate()
+                      frames = wav.readframes(wav.getnframes())
                   
-                  try:
-                      with wave.open(temp_audio, 'rb') as wav:
-                          rate = wav.getframerate()
-                          frames = wav.readframes(wav.getnframes())
-                  except:
-                      return False, 0.0
-                  
-                  frame_duration = 30
-                  frame_size = int(rate * frame_duration / 1000) * 2
-                  
+                  frame_size = int(rate * 30 / 1000) * 2
                   segments = []
                   speech = False
-                  start_time = 0.0
+                  start_speech = 0.0
                   
                   for i in range(0, len(frames) - frame_size, frame_size):
                       try:
                           is_speech = vad.is_speech(frames[i:i+frame_size], rate)
                           current_time = i / (rate * 2)
-                          
                           if is_speech and not speech:
                               speech = True
-                              start_time = max(0, current_time - 0.2)
+                              start_speech = max(0, current_time - 0.2)
                           elif not is_speech and speech:
                               speech = False
-                              segments.append((start_time, current_time + 0.2))
-                      except:
-                          continue
+                              segments.append((start_speech, current_time + 0.2))
+                      except: continue
                   
-                  if speech:
-                      segments.append((start_time, len(frames) / (rate * 2)))
+                  if speech: segments.append((start_speech, len(frames) / (rate * 2)))
+                  if not segments: return False, 0.0
                   
-                  if not segments:
-                      return False, 0.0
+                  merged = []
+                  cs, ce = segments[0]
+                  for ns, ne in segments[1:]:
+                      if ns - ce <= 0.5: ce = max(ce, ne)
+                      else: merged.append((cs, ce)); cs, ce = ns, ne
+                  merged.append((cs, ce))
                   
-                  merged = merge_segments(segments, SILENCE_THRESHOLD)
-                  
-                  ext = os.path.splitext(input_path)[1]
                   segment_files = []
-                  
-                  for i, (s, e) in enumerate(merged):
-                      duration = e - s
-                      seg_file = os.path.join(temp_dir, f"seg_{i:03d}{ext}")
-                      
-                      cmd = [
-                          'ffmpeg', '-y',
-                          '-ss', f"{s:.3f}",
-                          '-i', input_path,
-                          '-t', f"{duration:.3f}",
-                          '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', str(VIDEO_CRF),
-                          '-c:a', 'aac', '-b:a', AUDIO_BITRATE,
-                          '-avoid_negative_ts', 'make_zero',
-                          seg_file, '-loglevel', 'quiet'
-                      ]
-                      
-                      if run_cmd(cmd) and os.path.exists(seg_file) and os.path.getsize(seg_file) > 0:
+                  for s, e in merged:
+                      if e - s < 0.5: continue
+                      seg_file = os.path.join(temp_dir, f"seg_{len(segment_files):03d}.mp4")
+                      if run_cmd(['ffmpeg', '-y', '-ss', f"{s:.3f}", '-i', input_path, '-t', f"{e-s:.3f}", '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', str(VIDEO_CRF), '-c:a', 'aac', '-b:a', AUDIO_BITRATE, seg_file, '-loglevel', 'quiet']):
                           segment_files.append(seg_file)
                   
-                  if not segment_files:
-                      return False, 0.0
+                  if not segment_files: return False, 0.0
                   
                   concat_file = os.path.join(temp_dir, "concat.txt")
                   with open(concat_file, 'w') as f:
-                      for seg in segment_files:
-                          f.write(f"file '{seg}'\n")
+                      for seg in segment_files: f.write(f"file '{seg}'\n")
                   
                   if run_cmd(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_file, '-c', 'copy', output_path, '-loglevel', 'quiet']):
-                      new_duration = get_duration(output_path)
-                      removed = orig_duration - new_duration
-                      if removed < 0:
-                          removed = 0
-                      return True, removed
-              
+                      return True, orig_duration - get_duration(output_path)
               return False, 0.0
 
-          # Image generation functions
+          # ========== دوال إنشاء الصور ==========
           def get_single_line_font_size(word_count):
-              if word_count <= 3:
-                  return 90
-              elif word_count == 4:
-                  return 80
-              elif word_count == 5:
-                  return 68
-              else:
-                  return 57
-
-          def split_text_to_two_lines(text):
-              words = text.strip().split()
-              half = (len(words) + 1) // 2
-              return [" ".join(words[:half]), " ".join(words[half:])]
+              if word_count <= 3: return 90
+              elif word_count == 4: return 80
+              elif word_count == 5: return 68
+              else: return 57
 
           def create_image_with_title(text, output_path):
               word_count = len(text.strip().split())
-              
               if word_count >= 7:
                   bg_image = CACHED_BG_LONG
                   font_size = 70
@@ -333,371 +405,255 @@ jobs:
                   bg_to_use = bg_image
               
               if not use_multiline:
-                  svg = f'''<?xml version="1.0" encoding="UTF-8"?>
-          <svg width="1080" height="1920" xmlns="http://www.w3.org/2000/svg">
-              <defs>
-                  <style>
-                      @font-face {{
-                          font-family: 'Readex Pro';
-                          src: url('{FONT_FULL_PATH}');
-                      }}
-                      .title {{
-                          fill: white;
-                          font-family: 'Readex Pro', sans-serif;
-                          font-size: {font_size}px;
-                          font-weight: bold;
-                          text-anchor: middle;
-                          filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.5));
-                      }}
-                  </style>
-              </defs>
-              <text x="540" y="1390" class="title" direction="rtl">{text}</text>
-          </svg>'''
+                  svg = f'<svg width="1080" height="1920"><defs><style>@font-face{{font-family:"Readex Pro";src:url("{FONT_FULL_PATH}");}}.title{{fill:white;font-family:"Readex Pro";font-size:{font_size}px;font-weight:bold;text-anchor:middle;}}</style></defs><text x="540" y="1390" class="title" direction="rtl">{text}</text></svg>'
               else:
-                  lines = split_text_to_two_lines(text)
-                  svg = f'''<?xml version="1.0" encoding="UTF-8"?>
-          <svg width="1080" height="1920" xmlns="http://www.w3.org/2000/svg">
-              <defs>
-                  <style>
-                      @font-face {{
-                          font-family: 'Readex Pro';
-                          src: url('{FONT_FULL_PATH}');
-                      }}
-                      .title {{
-                          fill: white;
-                          font-family: 'Readex Pro', sans-serif;
-                          font-size: {font_size}px;
-                          font-weight: bold;
-                          text-anchor: middle;
-                          filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.5));
-                      }}
-                  </style>
-              </defs>
-              <text x="540" y="1390" class="title" direction="rtl">{lines[0]}</text>
-              <text x="540" y="1500" class="title" direction="rtl">{lines[1]}</text>
-          </svg>'''
+                  words = text.strip().split()
+                  half = (len(words) + 1) // 2
+                  line1, line2 = " ".join(words[:half]), " ".join(words[half:])
+                  svg = f'<svg width="1080" height="1920"><defs><style>@font-face{{font-family:"Readex Pro";src:url("{FONT_FULL_PATH}");}}.title{{fill:white;font-family:"Readex Pro";font-size:{font_size}px;font-weight:bold;text-anchor:middle;}}</style></defs><text x="540" y="1390" class="title" direction="rtl">{line1}</text><text x="540" y="1500" class="title" direction="rtl">{line2}</text></svg>'
               
               temp_svg = os.path.join(IMAGES_CACHE_DIR, "text_layer.svg")
-              with open(temp_svg, "w", encoding="utf-8") as f:
-                  f.write(svg)
+              with open(temp_svg, "w", encoding="utf-8") as f: f.write(svg)
               
               try:
                   subprocess.run(['sharp', 'composite', temp_svg, '--input', bg_to_use, '--output', output_path], check=True, capture_output=True)
               except:
-                  temp_text_png = os.path.join(IMAGES_CACHE_DIR, "temp_text.png")
-                  try:
-                      subprocess.run(['sharp', '-i', temp_svg, '-o', temp_text_png, '--density', '300'], check=True, capture_output=True)
-                      subprocess.run(['ffmpeg', '-y', '-i', bg_to_use, '-i', temp_text_png, '-filter_complex', 'overlay=0:0', '-frames:v', '1', output_path], check=True, capture_output=True)
-                  except:
-                      return False
-                  finally:
-                      if os.path.exists(temp_text_png):
-                          os.remove(temp_text_png)
+                  temp_png = os.path.join(IMAGES_CACHE_DIR, "temp_text.png")
+                  subprocess.run(['sharp', '-i', temp_svg, '-o', temp_png, '--density', '300'], capture_output=True)
+                  subprocess.run(['ffmpeg', '-y', '-i', bg_to_use, '-i', temp_png, '-filter_complex', 'overlay=0:0', '-frames:v', '1', output_path], capture_output=True)
+                  if os.path.exists(temp_png): os.remove(temp_png)
               
-              if os.path.exists(temp_svg):
-                  os.remove(temp_svg)
-              
+              if os.path.exists(temp_svg): os.remove(temp_svg)
               return os.path.exists(output_path)
 
-          # Video merging function
           def process_tiktok_reel(video_path, image_path, output_path):
-              filter_complex = (
-                  "[0:v]loop=loop=-1:size=1:start=0,setpts=PTS-STARTPTS,scale=trunc(iw/2)*2:trunc(ih/2)*2[bg]; "
-                  "[1:v]setpts=PTS-STARTPTS,crop=ih*4/5:ih:(iw-ow)/2:0,scale=820:1026[v_final]; "
-                  "[bg][v_final]overlay=(W-w)/2:150:shortest=1"
+              filter_complex = "[0:v]loop=-1:1:0,setpts=PTS-STARTPTS,scale=1080:1920[bg]; [1:v]setpts=PTS-STARTPTS,crop=ih*4/5:ih:(iw-ow)/2:0,scale=820:1026[v_final]; [bg][v_final]overlay=(W-w)/2:150:shortest=1"
+              return run_cmd(["ffmpeg", "-y", "-i", image_path, "-i", video_path, "-filter_complex", filter_complex, "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest", output_path])
+
+          # ========== دوال الإرسال ==========
+          def tg_send_video_requests(filepath, caption):
+              try:
+                  url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
+                  with open(filepath, 'rb') as video:
+                      response = requests.post(url, data={'chat_id': int(TG_TARGET), 'caption': caption, 'supports_streaming': True}, files={'video': video}, timeout=120)
+                      return response.status_code == 200
+              except: return False
+
+          async def tg_send_video_telethon(filepath, caption):
+              try:
+                  client = TelegramClient('session', TELEGRAM_API_ID, TELEGRAM_API_HASH)
+                  await client.start(bot_token=TELEGRAM_BOT_TOKEN)
+                  await client.send_file(int(TG_TARGET), filepath, caption=caption, supports_streaming=True)
+                  await client.disconnect()
+                  return True
+              except: return False
+
+          def send_video(filepath, caption):
+              if os.path.getsize(filepath) > TELEGRAM_LIMIT:
+                  return asyncio.run(tg_send_video_telethon(filepath, caption))
+              return tg_send_video_requests(filepath, caption)
+
+          # ========== دوال YouTube ==========
+          def get_youtube_service():
+              if not all([YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN]):
+                  print("⚠️ YouTube credentials missing, skipping YouTube upload")
+                  return None
+              
+              creds = Credentials(
+                  token=None,
+                  refresh_token=YOUTUBE_REFRESH_TOKEN,
+                  token_uri="https://oauth2.googleapis.com/token",
+                  client_id=YOUTUBE_CLIENT_ID,
+                  client_secret=YOUTUBE_CLIENT_SECRET,
+                  scopes=['https://www.googleapis.com/auth/youtube.upload']
               )
               
-              cmd = [
-                  "ffmpeg", "-y",
-                  "-i", image_path,
-                  "-i", video_path,
-                  "-filter_complex", filter_complex,
-                  "-pix_fmt", "yuv420p",
-                  "-c:v", "libx264",
-                  "-c:a", "aac", "-b:a", AUDIO_BITRATE,
-                  "-shortest",
-                  output_path
-              ]
+              if creds.expired:
+                  creds.refresh(AuthRequest())
               
-              return run_cmd(cmd)
+              return build('youtube', 'v3', credentials=creds)
 
-          # Download assets
-          def download_file(url, dest, name):
-              if os.path.exists(dest):
-                  return True
+          def upload_to_youtube(video_path, title, publish_time):
+              """رفع الفيديو إلى YouTube مع وقت نشر محدد"""
+              youtube = get_youtube_service()
+              if not youtube: return None
+              
               try:
-                  urllib.request.urlretrieve(url, dest)
-                  return True
-              except:
-                  return False
-
-          try:
-              if not os.path.exists(CACHED_FONT): 
-                  download_file(FONT_URL, CACHED_FONT, "font")
-              if not os.path.exists(CACHED_BG_SHORT): 
-                  download_file(BACKGROUND_SHORT_URL, CACHED_BG_SHORT, "background1")
-              if not os.path.exists(CACHED_BG_LONG): 
-                  download_file(BACKGROUND_LONG_URL, CACHED_BG_LONG, "background2")
-              if not os.path.exists(FONT_FULL_PATH):
-                  shutil.copy2(CACHED_FONT, FONT_FULL_PATH)
-                  subprocess.run(['fc-cache', '-fv'], capture_output=True)
-          except Exception as e: 
-              print(f"⚠️ Assets setup warning: {e}")
-
-          # Cookie setup
-          if COOKIES_TEXT:
-              with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-                  f.write(COOKIES_TEXT)
-          else:
-              print("❌ COOKIES_TEXT secret is missing!")
-              tg_msg("❌ خطأ: لم يتم العثور على السيكرت COOKIES_TEXT")
-              sys.exit(1)
-
-          # Download video
-          command = [
-              "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
-              "--remote-components", "ejs:github", "-f", "bestvideo+bestaudio/best",
-              "--merge-output-format", "mp4", "-o", TEMP_VIDEO, YT_URL
-          ]
-
-          print("\n📥 Downloading video...")
-          tg_msg("📥 جاري تحميل الفيديو بأعلى دقة...")
-
-          video_success = False
-          try:
-              result = subprocess.run(command, capture_output=True, text=True)
-              video_success = result.returncode == 0 and os.path.exists(TEMP_VIDEO)
-          except Exception as e: 
-              print(f"❌ Subprocess failed: {e}")
-
-          if not video_success:
-              if os.path.exists(COOKIES_FILE): 
-                  os.remove(COOKIES_FILE)
-              print("❌ Download failed!")
-              tg_msg("❌ فشل تحميل الفيديو.")
-              sys.exit(1)
-
-          video_duration = get_duration(TEMP_VIDEO)
-          print(f"📹 Video duration: {seconds_to_time(video_duration)}")
-
-          # Extract transcript
-          print("\n📜 Extracting transcript...")
-          srt_command = [
-              "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
-              "--remote-components", "ejs:github", "--skip-download",
-              "--write-auto-sub", "--sub-lang", "ar", "--output", SUB_OUTPUT, YT_URL
-          ]
-
-          transcript_exists = False
-          try:
-              subprocess.run(srt_command, capture_output=True, text=True)
-              if os.path.exists(EXPECTED_VTT):
-                  with open(EXPECTED_VTT, "r", encoding="utf-8") as vtt_f:
-                      vtt_content = vtt_f.read()
-
-                  lines = []
-                  for line in vtt_content.split('\n'):
-                      line = line.strip()
-                      if line and not line.startswith('WEBVTT') and not line.startswith('Kind:') and not line.startswith('Language:') and '-->' not in line:
-                          if not lines or lines[-1] != line:
-                              lines.append(line)
-
-                  with open(FINAL_TRANSCRIPT, "w", encoding="utf-8") as f:
-                      f.write('\n'.join(lines))
-                  transcript_exists = True
-          except Exception as e: 
-              print(f"❌ VTT Extraction failed: {e}")
-
-          if os.path.exists(COOKIES_FILE): 
-              os.remove(COOKIES_FILE)
-
-          if not transcript_exists:
-              print("❌ Transcript not found!")
-              tg_msg("❌ تعذر استخراج ملف الترجمة، توقفت العملية.")
-              sys.exit(1)
-
-          # Gemini AI Processing
-          if not GEMINI_KEY:
-              print("❌ GEMINI_API_KEY secret is missing!")
-              tg_msg("❌ خطأ: لم يتم العثور على السيكرت GEMINI_API_KEY")
-              sys.exit(1)
-
-          print("\n🤖 Sending transcript to Gemini...")
-          tg_msg("🤖 جاري الآن إرسال تفريغ النص إلى جيميناي عبر API للتحليل...")
-
-          try:
-              with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
-                  transcript_data = f.read()
-
-              user_prompt = f"""الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية. النص منسق كـ 'HH:MM:SS | النص'.
-
-          مهمتك: استخراج جميع الأسئلة والإجابات بدقة، مع تحديد وقت بداية السؤال ووقت نهاية الإجابة لكل مسألة.
-
-          **معايير تحديد بداية السؤال (START_TIME):**
-          1. ابحث عن الكلمات المفتاحية: 'سؤال'، 'يسأل'، 'أريد أن أسأل'، 'ما حكم'، 'هل يجوز'، 'ما رأيك'
-          2. ابحث عن صيغ الاستفهام: 'هل'، 'متى'، 'كيف'، 'لماذا'، 'أين'
-          3. ابحث عن انتقال المتحدث من الحديث العام إلى سؤال محدد
-          4. ابدأ من أول كلمة للسؤال، وليس من رد المحاضر
-
-          **معايير تحديد نهاية الإجابة (END_TIME):**
-          1. تنتهي الإجابة عندما ينتقل المتحدث إلى سؤال جديد أو موضوع مختلف تماماً
-          2. تنتهي عندما يقول المتحدث كلمات مثل: 'هذا والله أعلم'، 'انتهى'، 'ننتقل للسؤال التالي'
-          3. تنتهي عندما يبدأ السائل بسؤال جديد أو يعود المتحدث للرد على سائل آخر
-          4. لا تقطع الإجابة في منتصفها - تأكد من تغطية كامل الرد على السؤال
-          5. إذا كانت الإجابة طويلة ومتشعبة، حاول إيجاد نقطة النهاية الطبيعية للرد على السؤال الأصلي
-
-          **قواعد دقيقة للمقاطع:**
-          1. كل مقطع = سؤال واحد + إجابته الكاملة
-          2. إذا تحدث المحاضر عن مسألة فرعية ضمن الإجابة، اعتبرها جزءاً من نفس المقطع
-          3. إذا عاد المحاضر لنفس السؤال لاحقاً، اعتبره مقطعاً جديداً مستقلاً
-          4. المقطع يجب أن يكون متكاملاً ومفهوماً لوحده
-          5. لا تخلط بين الأسئلة المختلفة في مقطع واحد
-
-          **تنسيق الإخراج الإلزامي:**
-          يجب أن يكون الإخراج بالضبط كالتالي:
-          • [START_TIME] | [END_TIME] | [العنوان]
-          • [START_TIME] | [END_TIME] | [العنوان]
-          • [START_TIME] | [END_TIME] | [العنوان]
-
-          **قواعد الأوقات:**
-          1. START_TIME: وقت بداية السؤال (أول كلمة للسؤال)
-          2. END_TIME: وقت نهاية الإجابة (آخر كلمة للرد)
-          3. للأوقات أقل من ساعة: استخدم تنسيق MM:SS فقط (مثل 03:44، 15:30)
-          4. للأوقات أكثر من ساعة: استخدم تنسيق HH:MM:SS (مثل 01:05:30، 02:15:45)
-
-          **قواعد كتابة العناوين:**
-          1. العنوان يجب أن يكون سؤالاً مختصراً يعبر عن جوهر المسألة
-          2. استخدم صيغة السؤال: 'حكم كذا؟'، 'هل يجوز كذا؟'، 'ما شرح كذا؟'
-          3. لا تتجاوز 10 كلمات
-          4. اجعل العنوان واضحاً وسهل الفهم للمشاهد العادي
-
-          **أمثلة على التنسيق المطلوب:**
-          • 03:44 | 08:30 | حكم الصلاة في الثياب المتسخة
-          • 15:20 | 22:45 | هل يجوز صلاة الجمعة بدون خطبة
-          • 01:05:30 | 01:12:15 | شرح حديث الجارية
-          • 02:30:15 | 02:38:20 | الفرق بين الزكاة والصدقة
-
-          **تنبيهات مهمة:**
-          1. لا تخرج أي شيء غير التنسيق المطلوب
-          2. لا تكرر نفس السؤال في مقاطع متعددة
-          3. إذا لم تجد سؤالاً واضحاً، لا تخرج شيئاً
-          4. تأكد من أن END_TIME بعد START_TIME
-          5. افحص النص جيداً لاستخراج كل الأسئلة دون استثناء
-
-          ابدأ الإخراج مباشرة دون أي مقدمة أو شرح.
-
-          النص المراد تحليله:
-          {transcript_data}"""
-
-              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-              headers = {"Content-Type": "application/json"}
-              payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
-
-              response = requests.post(api_url, headers=headers, json=payload, timeout=60)
-
-              if response.status_code == 200:
-                  res_json = response.json()
-                  gemini_result = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
-
-                  print("\n✨ Gemini API Result:\n", gemini_result)
-
-                  with open(os.path.join(BASE_DIR, "gemini_output.txt"), "w", encoding="utf-8") as out_f:
-                      out_f.write(gemini_result)
-
-                  tg_msg(f"📋 **نتائج استخراج الأسئلة من جيميناي:**\n\n{gemini_result}")
-              else:
-                  print(f"❌ Gemini API Error Status: {response.status_code}\nResponse: {response.text}")
-                  tg_msg(f"❌ فشل طلب جيميناي. كود الخطأ: {response.status_code}")
-                  sys.exit(1)
-
-          except Exception as e:
-              print(f"❌ Requests processing failed: {e}")
-              tg_msg(f"❌ حدث خطأ أثناء إرسال الطلب: {e}")
-              sys.exit(1)
-
-          # Parse and adjust clips
-          clips = []
-          for line in gemini_result.strip().split('\n'):
-              if '|' in line:
-                  line = line.lstrip('• ').strip()
-                  parts = line.split('|')
-                  if len(parts) >= 3:
-                      original_start = parts[0].strip()
-                      original_end = parts[1].strip()
-                      title = parts[2].strip()
-                      
-                      new_start, new_end = adjust_timestamp(original_start, original_end, video_duration)
-                      
-                      clips.append({
-                          'start': new_start, 
-                          'end': new_end, 
-                          'title': title,
-                          'original_start': original_start,
-                          'original_end': original_end
-                      })
-                      
-                      print(f"  📍 Clip {len(clips)}: {original_start} → {original_end}  =>  {new_start} → {new_end} (+{abs(START_OFFSET)}s / +{END_OFFSET}s)")
-
-          if not clips:
-              tg_msg("⚠️ لم يتم العثور على مواقيت مقاطع صالحة للقص.")
-              sys.exit(0)
-
-          tg_msg(f"🚀 تم تأكيد مواقيت جيميناي وبدء عملية القص والإنتاج لـ ({len(clips)}) مقطع...")
-
-          # Process each clip
-          for idx, clip in enumerate(clips, 1):
-              print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']}")
-              
-              safe_name = "".join(c for c in clip['title'] if c.isalnum() or c == ' ' or c in '_-')
-              safe_name = safe_name.replace(' ', '_')[:100]
-              
-              raw_clip = os.path.join(BASE_DIR, f"raw_{idx}.mp4")
-              vad_clip = os.path.join(BASE_DIR, f"vad_{idx}.mp4")
-              img_path = os.path.join(BASE_DIR, f"img_{idx}.png")
-              output_path = os.path.join(BASE_DIR, f"{idx:02d}_{safe_name}.mp4")
-              
-              # Cut clip
-              print(f"  ✂️ Cutting: {clip['start']} → {clip['end']} (original: {clip['original_start']} → {clip['original_end']})")
-              if not extract_clip(TEMP_VIDEO, clip['start'], clip['end'], raw_clip):
-                  print(f"  ❌ Failed to cut clip")
-                  continue
-              
-              # Remove silence
-              print(f"  🔇 Removing silence...")
-              success, removed = remove_silence_from_video(raw_clip, vad_clip)
-              if not success:
-                  print(f"  ⚠️ Silence removal failed, using original")
-                  shutil.copy2(raw_clip, vad_clip)
-              elif removed > 0:
-                  print(f"  ✅ Removed {seconds_to_time(removed)} of silence")
-              
-              # Create image
-              print(f"  🖼️ Creating image...")
-              if not create_image_with_title(clip['title'], img_path):
-                  print(f"  ❌ Failed to create image")
-                  continue
-              
-              # Merge video with image
-              print(f"  🎬 Merging video with image...")
-              if process_tiktok_reel(vad_clip, img_path, output_path) and os.path.exists(output_path):
-                  size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                  print(f"  ✅ Merged successfully ({size_mb:.1f}MB)")
+                  body = {
+                      'snippet': {
+                          'title': f"{title} #shorts #islam #quran",
+                          'description': f"{title}\n\nتم الرفع آلياً بواسطة YouTube Ultimate QA Extractor",
+                          'categoryId': '22'
+                      },
+                      'status': {
+                          'privacyStatus': 'private',
+                          'publishAt': publish_time,
+                          'selfDeclaredMadeForKids': False
+                      }
+                  }
                   
-                  # Send to Telegram with simplified caption (only title, no emoji)
-                  caption_text = f"{clip['title']}"
-                  tg_send_video(output_path, caption_text)
-              else:
-                  print(f"  ❌ Failed to merge")
-              
-              # Cleanup
-              for temp_file in [raw_clip, vad_clip, img_path, output_path]:
-                  if os.path.exists(temp_file):
-                      try:
-                          os.remove(temp_file)
-                      except:
-                          pass
+                  media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+                  request = youtube.videos().insert(part='snippet,status', body=body, media_body=media)
+                  response = request.execute()
+                  
+                  if response and response.get('id'):
+                      print(f"✅ YouTube scheduled! Video ID: {response['id']} at {publish_time}")
+                      return response['id']
+              except Exception as e:
+                  print(f"❌ YouTube upload error: {e}")
+              return None
 
-          if os.path.exists(TEMP_VIDEO):
+          # ========== دوال GitHub ==========
+          def get_remaining_urls():
+              g = Github(GITHUB_TOKEN)
+              repo = g.get_repo(REPO_NAME)
+              try:
+                  contents = repo.get_contents(VIDEOS_FILE_PATH)
+                  urls = [line.strip() for line in contents.decoded_content.decode('utf-8').splitlines() if line.strip()]
+                  print(f"✅ Loaded {len(urls)} URLs")
+                  return urls, contents.sha
+              except: return [], None
+
+          def update_videos_file(remaining_urls, current_sha):
+              if not current_sha: return False
+              g = Github(GITHUB_TOKEN)
+              repo = g.get_repo(REPO_NAME)
+              new_content = "\n".join(remaining_urls)
+              if new_content and not new_content.endswith('\n'): new_content += '\n'
+              try:
+                  repo.update_file(VIDEOS_FILE_PATH, f"Update - Remaining: {len(remaining_urls)}", new_content, current_sha)
+                  return True
+              except: return False
+
+          # ========== دوال Gemini ==========
+          def get_gemini_prompt(transcript):
+              return f"""استخرج جميع الأسئلة والإجابات من هذا النص. النص منسق كـ 'HH:MM:SS | النص'.
+
+          التنسيق المطلوب:
+          • START_TIME | END_TIME | عنوان السؤال
+
+          القواعد:
+          - START_TIME: وقت بداية السؤال
+          - END_TIME: وقت نهاية الإجابة
+          - العنوان: سؤال مختصر (لا يتجاوز 10 كلمات)
+
+          النص:
+          {transcript}"""
+
+          # ========== المعالجة الرئيسية ==========
+          def process_single_video(youtube_url, video_index):
+              print(f"\n{'='*60}\nProcessing: {youtube_url}\n{'='*60}")
+              
+              # تحميل الفيديو
+              with open(COOKIES_FILE, "w") as f: f.write(COOKIES_TEXT)
+              if not run_cmd(["yt-dlp", "--cookies", COOKIES_FILE, "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", TEMP_VIDEO, youtube_url]):
+                  print("❌ Download failed"); return False
+              
+              video_duration = get_duration(TEMP_VIDEO)
+              
+              # استخراج الترجمة
+              if not run_cmd(["yt-dlp", "--cookies", COOKIES_FILE, "--skip-download", "--write-auto-sub", "--sub-lang", "ar", "--output", SUB_OUTPUT, youtube_url]):
+                  print("❌ Subtitle extraction failed"); os.remove(COOKIES_FILE); return False
+              
+              os.remove(COOKIES_FILE)
+              
+              if not os.path.exists(EXPECTED_VTT):
+                  print("❌ No Arabic subtitles found"); return False
+              
+              # معالجة الترجمة
+              with open(EXPECTED_VTT, "r") as f:
+                  lines = [line.strip() for line in f if line.strip() and not any(x in line for x in ['WEBVTT', 'Kind:', 'Language:', '-->'])]
+              with open(FINAL_TRANSCRIPT, "w") as f: f.write('\n'.join(lines))
+              
+              # Gemini
+              response = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}", 
+                                      headers={"Content-Type": "application/json"},
+                                      json={"contents": [{"parts": [{"text": get_gemini_prompt(open(FINAL_TRANSCRIPT).read())}]}]})
+              if response.status_code != 200: return False
+              
+              gemini_result = response.json()['candidates'][0]['content']['parts'][0]['text']
+              
+              # استخراج المقاطع
+              clips = []
+              for line in gemini_result.strip().split('\n'):
+                  if '|' in line:
+                      parts = [p.strip() for p in line.lstrip('• ').split('|')]
+                      if len(parts) >= 3:
+                          new_start, new_end = adjust_timestamp(parts[0], parts[1], video_duration)
+                          clips.append({'start': new_start, 'end': new_end, 'title': parts[2]})
+              
+              if not clips: return False
+              
+              # معالجة كل مقطع وإضافته إلى الجدولة
+              for idx, clip in enumerate(clips, 1):
+                  safe_name = "".join(c for c in clip['title'] if c.isalnum() or c == ' ').replace(' ', '_')[:100]
+                  raw_clip = f"raw_{video_index}_{idx}.mp4"
+                  vad_clip = f"vad_{video_index}_{idx}.mp4"
+                  img_path = f"img_{video_index}_{idx}.png"
+                  output_path = f"{idx:02d}_{safe_name}.mp4"
+                  
+                  if not extract_clip(TEMP_VIDEO, clip['start'], clip['end'], raw_clip): continue
+                  remove_silence_from_video(raw_clip, vad_clip)
+                  if not create_image_with_title(clip['title'], img_path): continue
+                  if process_tiktok_reel(vad_clip, img_path, output_path):
+                      # إرسال إلى تليجرام فوراً
+                      send_video(output_path, clip['title'])
+                      
+                      # إضافة إلى جدولة YouTube
+                      scheduled = add_to_schedule(clip['title'], output_path, f"{video_index}_{idx}")
+                      # رفع الفيديو إلى YouTube مع وقت الجدولة
+                      upload_to_youtube(output_path, clip['title'], scheduled["publish_time"])
+                  
+                  for f in [raw_clip, vad_clip, img_path, output_path]:
+                      if os.path.exists(f): os.remove(f)
+              
               os.remove(TEMP_VIDEO)
+              return True
+
+          # ========== التشغيل ==========
+          print("="*60)
+          print("YouTube Ultimate QA Extractor - Batch Process")
+          print(f"Publishing hours (UTC): {PUBLISH_HOURS}")
+          print("="*60)
           
-          tg_msg("🏁 اكتملت الدورة البرمجية المؤتمتة بالكامل! تم إنتاج ورفع جميع المقاطع بنجاح.")
+          # تحميل الجدولة الحالية
+          schedule = load_schedule()
+          print(f"📅 Current schedule loaded. Published: {len(schedule.get('published_videos', []))}, Scheduled: {len(schedule.get('scheduled_videos', []))}")
+          
+          # الحصول على الروابط
+          urls_to_process, file_sha = get_remaining_urls()
+          if not urls_to_process:
+              print("✅ No URLs found in videos.txt")
+              print("📊 Final Schedule Status:")
+              print(f"   - Published videos: {len(schedule.get('published_videos', []))}")
+              print(f"   - Scheduled videos: {len(schedule.get('scheduled_videos', []))}")
+              sys.exit(0)
+          
+          # معالجة الروابط
+          for video_index, url in enumerate(urls_to_process[:]):
+              print(f"\n--- Processing video {video_index + 1}/{len(urls_to_process)}: {url} ---")
+              success = process_single_video(url, video_index)
+              urls_to_process.remove(url)
+              
+              if not update_videos_file(urls_to_process, file_sha):
+                  print("❌ Failed to update videos.txt")
+                  sys.exit(1)
+              
+              _, file_sha = get_remaining_urls()
+              print(f"Remaining: {len(urls_to_process)}")
+          
+          # عرض التقرير النهائي
+          schedule = load_schedule()
+          print("\n" + "="*60)
+          print("🏁 Batch processing complete!")
+          print(f"✅ Videos processed: {len(urls_to_process)}")
+          print(f"📊 Final Schedule Status:")
+          print(f"   - Published videos: {len(schedule.get('published_videos', []))}")
+          print(f"   - Scheduled videos: {len(schedule.get('scheduled_videos', []))}")
+          
+          # عرض الفيديوهات المجدولة
+          if schedule.get('scheduled_videos'):
+              print("\n📅 Scheduled Videos:")
+              for video in schedule['scheduled_videos']:
+                  print(f"   - {video['title']} at {video['publish_time']}")
+          print("="*60)
