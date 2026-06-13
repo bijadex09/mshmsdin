@@ -60,6 +60,7 @@ jobs:
           import asyncio
           import datetime
           import base64
+          import time
           from typing import List, Tuple
           from telethon import TelegramClient
           from googleapiclient.discovery import build
@@ -412,7 +413,7 @@ jobs:
                   print(f"❌ YouTube error: {e}")
               return None
 
-          # ========== دوال Gemini ==========
+          # ========== دوال Gemini (مع زيادة المهلة وتقليل النص) ==========
           def get_gemini_prompt(transcript):
               return f"""الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية. النص منسق كـ 'HH:MM:SS | النص'.
 
@@ -421,23 +422,53 @@ jobs:
           **معايير تحديد بداية السؤال (START_TIME):**
           1. ابحث عن الكلمات المفتاحية: 'سؤال'، 'يسأل'، 'أريد أن أسأل'، 'ما حكم'، 'هل يجوز'، 'ما رأيك'
           2. ابحث عن صيغ الاستفهام: 'هل'، 'متى'، 'كيف'، 'لماذا'، 'أين'
-          3. ابحث عن انتقال المتحدث من الحديث العام إلى سؤال محدد
 
           **معايير تحديد نهاية الإجابة (END_TIME):**
-          1. تنتهي الإجابة عندما ينتقل المتحدث إلى سؤال جديد أو موضوع مختلف تماماً
-          2. تنتهي عندما يقول المتحدث كلمات مثل: 'هذا والله أعلم'، 'انتهى'، 'ننتقل للسؤال التالي'
+          1. تنتهي الإجابة عندما ينتقل المتحدث إلى سؤال جديد
+          2. تنتهي عندما يقول المحاضر: 'هذا والله أعلم'، 'انتهى'
 
           **تنسيق الإخراج الإلزامي:**
           • [START_TIME] | [END_TIME] | [العنوان]
 
-          **قواعد الأوقات:**
-          - استخدم تنسيق MM:SS للأوقات أقل من ساعة
-          - استخدم تنسيق HH:MM:SS للأوقات أكثر من ساعة
+          **ملاحظة: خذ أول 20 دقيقة فقط من النص إذا كان طويلاً**
 
-          ابدأ الإخراج مباشرة دون أي مقدمة أو شرح.
+          ابدأ الإخراج مباشرة.
 
-          النص المراد تحليله:
+          النص:
           {transcript}"""
+
+          def send_to_gemini(text, max_retries=3):
+              """إرسال النص إلى Gemini مع إعادة المحاولة"""
+              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+              headers = {"Content-Type": "application/json"}
+              
+              # تقليل حجم النص إذا كان كبيراً جداً
+              if len(text) > 25000:
+                  text = text[:25000]
+                  print("⚠️ Transcript truncated to 25000 characters")
+              
+              user_prompt = get_gemini_prompt(text)
+              payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
+              
+              for attempt in range(max_retries):
+                  try:
+                      print(f"📡 Sending to Gemini (attempt {attempt + 1}/{max_retries})...")
+                      response = requests.post(api_url, headers=headers, json=payload, timeout=180)  # 3 دقائق مهلة
+                      
+                      if response.status_code == 200:
+                          res_json = response.json()
+                          return res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                      else:
+                          print(f"⚠️ Gemini error {response.status_code}, retrying...")
+                          time.sleep(5)
+                  except requests.exceptions.Timeout:
+                      print(f"⚠️ Timeout on attempt {attempt + 1}, retrying...")
+                      time.sleep(10)
+                  except Exception as e:
+                      print(f"⚠️ Error: {e}, retrying...")
+                      time.sleep(5)
+              
+              return None
 
           # ========== دوال الجدولة ==========
           def load_schedule():
@@ -520,7 +551,7 @@ jobs:
               print(f"📅 Scheduled: {video_title} at {scheduled['publish_time']}")
               return scheduled
 
-          # ========== المعالجة الرئيسية (بنفس الطريقة القديمة الناجحة) ==========
+          # ========== المعالجة الرئيسية ==========
           def process_video(youtube_url):
               print(f"\n{'='*60}\nProcessing: {youtube_url}\n{'='*60}")
               
@@ -528,7 +559,7 @@ jobs:
               with open(COOKIES_FILE, "w", encoding="utf-8") as f:
                   f.write(COOKIES_TEXT)
               
-              # 2. تحميل الفيديو (نفس الطريقة القديمة)
+              # 2. تحميل الفيديو
               print("📥 Downloading video...")
               command = [
                   "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
@@ -545,7 +576,7 @@ jobs:
               video_duration = get_duration(TEMP_VIDEO)
               print(f"📹 Video duration: {seconds_to_time(video_duration)}")
               
-              # 3. استخراج الترجمة (نفس الطريقة القديمة - لا نحذف الكوكيز قبل الترجمة)
+              # 3. استخراج الترجمة
               print("📜 Extracting transcript...")
               srt_command = [
                   "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
@@ -573,7 +604,7 @@ jobs:
               except Exception as e:
                   print(f"❌ VTT Extraction failed: {e}")
               
-              # حذف الكوكيز بعد الانتهاء من استخراج الترجمة
+              # حذف الكوكيز بعد الانتهاء
               if os.path.exists(COOKIES_FILE):
                   os.remove(COOKIES_FILE)
               
@@ -581,33 +612,29 @@ jobs:
                   print("❌ Transcript not found!")
                   return False
               
-              # 4. Gemini AI (نفس الطريقة القديمة)
+              # 4. Gemini AI (مع مهلة أطول)
               if not GEMINI_KEY:
                   print("❌ GEMINI_API_KEY missing!")
                   return False
               
-              print("🤖 Sending transcript to Gemini...")
-              try:
-                  with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
-                      transcript_data = f.read()
-                  
-                  user_prompt = get_gemini_prompt(transcript_data)
-                  api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-                  headers = {"Content-Type": "application/json"}
-                  payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
-                  
-                  response = requests.post(api_url, headers=headers, json=payload, timeout=60)
-                  
-                  if response.status_code != 200:
-                      print(f"❌ Gemini API Error: {response.status_code}")
-                      return False
-                  
-                  res_json = response.json()
-                  gemini_result = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
-                  print("✨ Gemini analysis complete.")
-              except Exception as e:
-                  print(f"❌ Gemini processing failed: {e}")
+              print("🤖 Sending transcript to Gemini (this may take a few minutes)...")
+              
+              # قراءة الترجمة وتقليصها إذا لزم الأمر
+              with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
+                  transcript_data = f.read()
+              
+              # إذا كان النص طويلاً جداً، خذ أول 20000 حرف فقط (حوالي 20 دقيقة)
+              if len(transcript_data) > 20000:
+                  transcript_data = transcript_data[:20000]
+                  print(f"⚠️ Transcript truncated to 20000 characters (from {len(transcript_data)})")
+              
+              gemini_result = send_to_gemini(transcript_data)
+              
+              if not gemini_result:
+                  print("❌ Gemini failed after retries")
                   return False
+              
+              print("✨ Gemini analysis complete.")
               
               # 5. استخراج المقاطع
               clips = []
