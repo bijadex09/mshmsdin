@@ -1,7 +1,15 @@
 {
-  "last_updated": "2026-06-13T12:04:20Z",
+  "last_updated": "2026-06-13T12:05:33Z",
   "last_publish_time": null,
   "last_publish_date": null,
-  "scheduled_videos": [],
+  "scheduled_videos": [
+    {
+      "id": "20260613120533_1",
+      "title": "سماع شروحات المتون أم قراءتها مفرغة؟",
+      "video_path": "01_سماع_شروحات_المتون_أم_قراءتها_مفرغة.mp4",
+      "publish_time": "2026-06-13T14:00:00Z",
+      "status": "scheduled"
+    }
+  ],
   "published_videos": []
 }
