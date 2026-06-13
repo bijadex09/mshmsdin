@@ -1,6 +1,7 @@
+name: YouTube Ultimate QA Extractor - Every 3 Days
+
 on:
   schedule:
-    # يعمل كل 3 أيام في الساعة 00:00 (12 منتصف الليل) بالتوقيت العالمي UTC
     - cron: '0 0 */3 * *'
   workflow_dispatch:
     inputs:
@@ -612,9 +613,9 @@ jobs:
                   print(f"❌ YouTube error: {e}")
               return None
 
-          # ========== دوال Gemini مع تقسيم النص ==========
-          def split_transcript(transcript, max_chars=15000):
-              """تقسيم النص الطويل إلى أجزاء متعددة"""
+          # ========== دوال Gemini مع تقسيم النص (بزيادة حجم الجزء) ==========
+          def split_transcript(transcript, max_chars=100000):  # تم التعديل: من 15000 إلى 100000
+              """تقسيم النص الطويل إلى أجزاء متعددة (كل جزء حتى 100,000 حرف)"""
               if len(transcript) <= max_chars:
                   return [transcript]
               
@@ -636,11 +637,10 @@ jobs:
               if current_part:
                   parts.append('\n'.join(current_part))
               
-              print(f"📊 Transcript split into {len(parts)} parts for processing")
+              print(f"📊 Transcript split into {len(parts)} parts (max {max_chars} chars per part)")
               return parts
 
           def extract_clips_from_part(part_text, part_index, total_parts):
-              """إرسال جزء من النص إلى Gemini واستخراج المواقيت"""
               user_prompt = f"""الوثيقة هي جزء {part_index + 1} من {total_parts} من نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية.
 
           استخرج جميع الأسئلة والإجابات في هذا الجزء فقط بهذا التنسيق:
@@ -660,7 +660,7 @@ jobs:
               for attempt in range(3):
                   try:
                       print(f"  📡 Processing part {part_index + 1}/{total_parts} (attempt {attempt + 1})...")
-                      response = requests.post(api_url, headers=headers, json=payload, timeout=180)
+                      response = requests.post(api_url, headers=headers, json=payload, timeout=300)  # زيادة المهلة إلى 5 دقائق
                       
                       if response.status_code == 200:
                           res_json = response.json()
@@ -676,7 +676,6 @@ jobs:
               return ""
 
           def merge_clips_results(results):
-              """دمج نتائج الأجزاء المختلفة وإزالة التكرارات"""
               all_clips = []
               seen_times = set()
               
@@ -781,8 +780,8 @@ jobs:
               
               print(f"📄 Transcript length: {len(transcript_data)} characters")
               
-              # تقسيم النص الطويل إلى أجزاء
-              transcript_parts = split_transcript(transcript_data, max_chars=15000)
+              # تقسيم النص الطويل إلى أجزاء (كل جزء حتى 100,000 حرف)
+              transcript_parts = split_transcript(transcript_data, max_chars=100000)
               
               # معالجة كل جزء على حدة
               part_results = []
@@ -886,7 +885,7 @@ jobs:
 
           # ========== التشغيل ==========
           print("="*60)
-          print("YouTube Ultimate QA Extractor - Daily Schedule")
+          print("YouTube Ultimate QA Extractor - Every 3 Days")
           print(f"Max clip duration: {MAX_CLIP_DURATION} seconds (3 minutes)")
           print("="*60)
           
