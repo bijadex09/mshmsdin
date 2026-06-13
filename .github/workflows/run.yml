@@ -1,6 +1,9 @@
-name: YouTube Ultimate QA Extractor
+name: YouTube Ultimate QA Extractor - Daily Schedule
 
 on:
+  schedule:
+    # يعمل كل يوم في الساعة 00:00 (12 منتصف الليل) بالتوقيت العالمي UTC
+    - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
       telegram_target:
@@ -9,7 +12,7 @@ on:
         default: '-1004447957881'
 
 jobs:
-  process-all-videos:
+  process-single-video:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -33,9 +36,9 @@ jobs:
           pip install --upgrade pip
           pip install --upgrade yt-dlp
 
-      - name: Batch Process Videos
+      - name: Process Single Video
         env:
-          TG_TARGET: ${{ github.event.inputs.telegram_target }}
+          TG_TARGET: ${{ secrets.TELEGRAM_TARGET }}
           COOKIES_TEXT: ${{ secrets.COOKIES_TEXT }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -83,6 +86,7 @@ jobs:
           
           VIDEOS_FILE_PATH = "videos.txt"
           SCHEDULE_FILE_PATH = "schedule.json"
+          LOG_FILE_PATH = "processing_log.txt"
           BASE_DIR = os.getcwd()
           TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
           COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
@@ -91,7 +95,7 @@ jobs:
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
 
           # أوقات النشر (بالتوقيت العالمي UTC)
-          PUBLISH_HOURS = [12, 15, 18, 21, 23]  # 5 مواعيد يومياً
+          PUBLISH_HOURS = [12, 15, 18, 21, 23]
 
           # إعدادات الصور والخطوط
           FONT_SYSTEM_DIR = os.path.expanduser("~/.local/share/fonts")
@@ -117,16 +121,29 @@ jobs:
           END_OFFSET = 5
           TELEGRAM_LIMIT = 20 * 1024 * 1024
 
-          # ========== دوال GitHub API باستخدام requests فقط ==========
+          # ========== دوال السجل ==========
+          def log_message(msg):
+              """تسجيل الرسائل في ملف السجل"""
+              timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+              log_entry = f"[{timestamp}] {msg}"
+              print(log_entry)
+              
+              # حفظ في ملف السجل
+              try:
+                  with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
+                      f.write(log_entry + '\n')
+              except:
+                  pass
+
+          # ========== دوال GitHub API ==========
           def get_github_headers():
-              """إعداد headers لـ GitHub API"""
               return {
                   "Authorization": f"Bearer {GITHUB_TOKEN}",
                   "Accept": "application/vnd.github.v3+json"
               }
 
-          def get_remaining_urls():
-              """قراءة الروابط من GitHub باستخدام requests"""
+          def get_first_url():
+              """قراءة أول رابط فقط من ملف videos.txt"""
               url = f"https://api.github.com/repos/{REPO_NAME}/contents/{VIDEOS_FILE_PATH}"
               headers = get_github_headers()
               
@@ -136,19 +153,23 @@ jobs:
                       data = response.json()
                       content = base64.b64decode(data['content']).decode('utf-8')
                       urls = [line.strip() for line in content.splitlines() if line.strip()]
-                      print(f"✅ Loaded {len(urls)} URLs from videos.txt")
-                      return urls, data['sha']
+                      if urls:
+                          log_message(f"✅ First URL: {urls[0]}")
+                          log_message(f"📊 Total URLs remaining: {len(urls)}")
+                          return urls[0], urls[1:], data['sha']
+                      else:
+                          log_message("✅ No URLs found in videos.txt")
+                          return None, [], None
                   else:
-                      print(f"❌ Failed to read videos.txt: {response.status_code}")
-                      return [], None
+                      log_message(f"❌ Failed to read videos.txt: {response.status_code}")
+                      return None, [], None
               except Exception as e:
-                  print(f"❌ Error reading videos.txt: {e}")
-                  return [], None
+                  log_message(f"❌ Error: {e}")
+                  return None, [], None
 
           def update_videos_file(remaining_urls, current_sha):
-              """تحديث ملف videos.txt على GitHub"""
+              """تحديث الملف بحذف الرابط الأول فقط"""
               if not current_sha:
-                  print("❌ No SHA reference for videos.txt")
                   return False
               
               url = f"https://api.github.com/repos/{REPO_NAME}/contents/{VIDEOS_FILE_PATH}"
@@ -159,7 +180,7 @@ jobs:
                   new_content += '\n'
               
               data = {
-                  "message": f"Update videos.txt - Remaining: {len(remaining_urls)}",
+                  "message": f"Remove processed video. Remaining: {len(remaining_urls)}",
                   "content": base64.b64encode(new_content.encode()).decode(),
                   "sha": current_sha
               }
@@ -167,153 +188,67 @@ jobs:
               try:
                   response = requests.put(url, headers=headers, json=data)
                   if response.status_code == 200:
-                      print(f"✅ Updated videos.txt successfully")
+                      log_message(f"✅ Removed URL from videos.txt. Remaining: {len(remaining_urls)}")
                       return True
                   else:
-                      print(f"❌ Failed to update videos.txt: {response.status_code}")
+                      log_message(f"❌ Failed to update: {response.status_code}")
                       return False
               except Exception as e:
-                  print(f"❌ Error updating videos.txt: {e}")
+                  log_message(f"❌ Error: {e}")
                   return False
 
-          def upload_schedule_to_github():
-              """رفع ملف الجدولة إلى GitHub"""
-              if not GITHUB_TOKEN or not REPO_NAME:
-                  return
+          # ========== التحقق من وجود ترجمة ==========
+          def check_subtitles(youtube_url):
+              """التحقق من وجود ترجمة عربية قبل تحميل الفيديو"""
+              log_message("🔍 Checking for Arabic subtitles...")
               
-              url = f"https://api.github.com/repos/{REPO_NAME}/contents/{SCHEDULE_FILE_PATH}"
-              headers = get_github_headers()
+              with open(COOKIES_FILE, "w") as f:
+                  f.write(COOKIES_TEXT)
               
-              with open(SCHEDULE_FILE_PATH, 'r', encoding='utf-8') as f:
-                  content = f.read()
-              
-              # الحصول على SHA الحالي إذا كان الملف موجوداً
-              response = requests.get(url, headers=headers)
-              current_sha = None
-              if response.status_code == 200:
-                  current_sha = response.json().get('sha')
-              
-              data = {
-                  "message": "Update schedule",
-                  "content": base64.b64encode(content.encode()).decode()
-              }
-              if current_sha:
-                  data["sha"] = current_sha
+              # استخدام yt-dlp لفحص الترجمة فقط
+              cmd = [
+                  "yt-dlp", "--cookies", COOKIES_FILE,
+                  "--list-subs", "--skip-download",
+                  youtube_url
+              ]
               
               try:
-                  if current_sha:
-                      response = requests.put(url, headers=headers, json=data)
-                  else:
-                      response = requests.put(url, headers=headers, json=data)
+                  result = subprocess.run(cmd, capture_output=True, text=True)
+                  output = result.stdout + result.stderr
                   
-                  if response.status_code in [200, 201]:
-                      print(f"✅ Schedule saved to GitHub")
+                  has_arabic = False
+                  for line in output.split('\n'):
+                      if 'ar' in line.lower() or 'arabic' in line.lower():
+                          has_arabic = True
+                          break
+                  
+                  # التحقق أيضاً من وجود ملف الترجمة التلقائية
+                  test_cmd = [
+                      "yt-dlp", "--cookies", COOKIES_FILE,
+                      "--write-auto-sub", "--sub-lang", "ar",
+                      "--skip-download", "--sub-format", "vtt",
+                      "-o", SUB_OUTPUT, youtube_url
+                  ]
+                  subprocess.run(test_cmd, capture_output=True, text=True)
+                  
+                  if os.path.exists(EXPECTED_VTT):
+                      has_arabic = True
+                  
+                  if has_arabic:
+                      log_message("✅ Arabic subtitles found!")
                   else:
-                      print(f"⚠️ Failed to upload schedule: {response.status_code}")
+                      log_message("❌ No Arabic subtitles found for this video")
+                  
+                  return has_arabic
+                  
               except Exception as e:
-                  print(f"⚠️ Failed to upload schedule: {e}")
+                  log_message(f"❌ Error checking subtitles: {e}")
+                  return False
+              finally:
+                  if os.path.exists(COOKIES_FILE):
+                      os.remove(COOKIES_FILE)
 
-          # ========== دوال إدارة الجدولة ==========
-          def load_schedule():
-              """تحميل ملف الجدولة، وإنشائه إذا لم يكن موجوداً"""
-              if os.path.exists(SCHEDULE_FILE_PATH):
-                  try:
-                      with open(SCHEDULE_FILE_PATH, 'r', encoding='utf-8') as f:
-                          return json.load(f)
-                  except:
-                      pass
-              
-              # إنشاء ملف جدولة جديد
-              now = datetime.datetime.now(datetime.timezone.utc)
-              schedule = {
-                  "last_updated": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                  "current_day_index": 0,
-                  "current_hour_index": 0,
-                  "scheduled_videos": [],
-                  "published_videos": []
-              }
-              save_schedule(schedule)
-              return schedule
-
-          def save_schedule(schedule):
-              """حفظ ملف الجدولة"""
-              schedule["last_updated"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-              with open(SCHEDULE_FILE_PATH, 'w', encoding='utf-8') as f:
-                  json.dump(schedule, f, indent=2, ensure_ascii=False)
-              upload_schedule_to_github()
-
-          def get_next_schedule_time():
-              """الحصول على موعد النشر التالي بناءً على الجدولة"""
-              schedule = load_schedule()
-              now = datetime.datetime.now(datetime.timezone.utc)
-              
-              # إذا كان هناك فيديوهات مجدولة مسبقاً، استخدم أولها
-              if schedule.get("scheduled_videos"):
-                  first_scheduled = schedule["scheduled_videos"][0]
-                  scheduled_time = datetime.datetime.strptime(first_scheduled["publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-                  if scheduled_time > now:
-                      return scheduled_time, first_scheduled
-              
-              # حساب الموعد التالي من الصفر
-              day_offset = schedule.get("current_day_index", 0)
-              hour_offset = schedule.get("current_hour_index", 0)
-              
-              # بدء من اليوم الحالي
-              target_date = now.date()
-              
-              # إذا كان اليوم الحالي قد تجاوز عدد الساعات المتبقية، انتقل لليوم التالي
-              if hour_offset >= len(PUBLISH_HOURS):
-                  hour_offset = 0
-                  day_offset += 1
-                  target_date += datetime.timedelta(days=day_offset)
-              
-              # الحصول على ساعة النشر
-              target_hour = PUBLISH_HOURS[hour_offset]
-              
-              # إنشاء وقت النشر
-              publish_time = datetime.datetime.combine(target_date, datetime.time(target_hour, 0, tzinfo=datetime.timezone.utc))
-              
-              # إذا كان الوقت قد مضى، انتقل للساعة التالية
-              if publish_time <= now:
-                  hour_offset += 1
-                  if hour_offset >= len(PUBLISH_HOURS):
-                      hour_offset = 0
-                      day_offset += 1
-                      target_date += datetime.timedelta(days=day_offset)
-                      publish_time = datetime.datetime.combine(target_date, datetime.time(PUBLISH_HOURS[0], 0, tzinfo=datetime.timezone.utc))
-                  else:
-                      publish_time = datetime.datetime.combine(target_date, datetime.time(PUBLISH_HOURS[hour_offset], 0, tzinfo=datetime.timezone.utc))
-              
-              # تحديث الجدولة
-              schedule["current_day_index"] = day_offset
-              schedule["current_hour_index"] = hour_offset + 1 if hour_offset + 1 < len(PUBLISH_HOURS) else 0
-              if hour_offset + 1 >= len(PUBLISH_HOURS):
-                  schedule["current_day_index"] = day_offset + 1
-              
-              save_schedule(schedule)
-              
-              return publish_time, None
-
-          def add_to_schedule(video_title, video_path, clip_index):
-              """إضافة فيديو إلى جدولة النشر"""
-              schedule = load_schedule()
-              publish_time, _ = get_next_schedule_time()
-              
-              scheduled_video = {
-                  "id": f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{clip_index}",
-                  "title": video_title,
-                  "video_path": video_path,
-                  "publish_time": publish_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                  "status": "scheduled"
-              }
-              
-              schedule["scheduled_videos"].append(scheduled_video)
-              save_schedule(schedule)
-              
-              print(f"📅 Scheduled: {video_title} at {scheduled_video['publish_time']}")
-              return scheduled_video
-
-          # ========== دوال التحميل الأساسية ==========
+          # ========== دوال التحميل والمعالجة ==========
           def download_file(url, dest):
               if os.path.exists(dest): return True
               try: urllib.request.urlretrieve(url, dest); return True
@@ -326,7 +261,8 @@ jobs:
               if not os.path.exists(FONT_FULL_PATH):
                   shutil.copy2(CACHED_FONT, FONT_FULL_PATH)
                   subprocess.run(['fc-cache', '-fv'], capture_output=True)
-          except Exception as e: print(f"⚠️ Assets warning: {e}")
+          except Exception as e: 
+              log_message(f"⚠️ Assets warning: {e}")
 
           def get_duration(file_path: str) -> float:
               try:
@@ -360,7 +296,6 @@ jobs:
               if end_sec <= start_sec: end_sec = start_sec + 1
               return seconds_to_time(start_sec), seconds_to_time(end_sec)
 
-          # ========== دوال قص وإزالة الصمت ==========
           def extract_clip(video_path: str, start: str, end: str, output_path: str) -> bool:
               return run_cmd(['ffmpeg', '-y', '-i', video_path, '-ss', start, '-to', end, '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', str(VIDEO_CRF), '-c:a', 'aac', '-b:a', AUDIO_BITRATE, '-loglevel', 'error', output_path])
 
@@ -424,7 +359,6 @@ jobs:
                       return True, orig_duration - get_duration(output_path)
               return False, 0.0
 
-          # ========== دوال إنشاء الصور ==========
           def get_single_line_font_size(word_count):
               if word_count <= 3: return 90
               elif word_count == 4: return 80
@@ -476,7 +410,6 @@ jobs:
               filter_complex = "[0:v]loop=-1:1:0,setpts=PTS-STARTPTS,scale=1080:1920[bg]; [1:v]setpts=PTS-STARTPTS,crop=ih*4/5:ih:(iw-ow)/2:0,scale=820:1026[v_final]; [bg][v_final]overlay=(W-w)/2:150:shortest=1"
               return run_cmd(["ffmpeg", "-y", "-i", image_path, "-i", video_path, "-filter_complex", filter_complex, "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest", output_path])
 
-          # ========== دوال الإرسال ==========
           def tg_send_video_requests(filepath, caption):
               try:
                   url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
@@ -499,10 +432,9 @@ jobs:
                   return asyncio.run(tg_send_video_telethon(filepath, caption))
               return tg_send_video_requests(filepath, caption)
 
-          # ========== دوال YouTube ==========
           def get_youtube_service():
               if not all([YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN]):
-                  print("⚠️ YouTube credentials missing, skipping YouTube upload")
+                  log_message("⚠️ YouTube credentials missing")
                   return None
               
               creds = Credentials(
@@ -515,14 +447,13 @@ jobs:
               )
               
               if creds.expired:
-                  print("🔄 Refreshing YouTube token...")
+                  log_message("🔄 Refreshing YouTube token...")
                   creds.refresh(AuthRequest())
-                  print("✅ YouTube token refreshed")
+                  log_message("✅ YouTube token refreshed")
               
               return build('youtube', 'v3', credentials=creds)
 
           def upload_to_youtube(video_path, title, publish_time):
-              """رفع الفيديو إلى YouTube مع وقت نشر محدد"""
               youtube = get_youtube_service()
               if not youtube: return None
               
@@ -530,7 +461,7 @@ jobs:
                   body = {
                       'snippet': {
                           'title': f"{title} #shorts #islam #quran",
-                          'description': f"{title}\n\nتم الرفع آلياً بواسطة YouTube Ultimate QA Extractor",
+                          'description': f"{title}\n\nتم الرفع آلياً",
                           'categoryId': '22'
                       },
                       'status': {
@@ -545,13 +476,12 @@ jobs:
                   response = request.execute()
                   
                   if response and response.get('id'):
-                      print(f"✅ YouTube scheduled! Video ID: {response['id']} at {publish_time}")
+                      log_message(f"✅ YouTube scheduled! Video ID: {response['id']}")
                       return response['id']
               except Exception as e:
-                  print(f"❌ YouTube upload error: {e}")
+                  log_message(f"❌ YouTube error: {e}")
               return None
 
-          # ========== دوال Gemini ==========
           def get_gemini_prompt(transcript):
               return f"""استخرج جميع الأسئلة والإجابات من هذا النص. النص منسق كـ 'HH:MM:SS | النص'.
 
@@ -566,40 +496,138 @@ jobs:
           النص:
           {transcript}"""
 
+          # ========== دوال الجدولة ==========
+          def load_schedule():
+              if os.path.exists(SCHEDULE_FILE_PATH):
+                  try:
+                      with open(SCHEDULE_FILE_PATH, 'r', encoding='utf-8') as f:
+                          return json.load(f)
+                  except: pass
+              
+              schedule = {
+                  "last_updated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "current_day_index": 0,
+                  "current_hour_index": 0,
+                  "scheduled_videos": [],
+                  "published_videos": []
+              }
+              save_schedule(schedule)
+              return schedule
+
+          def save_schedule(schedule):
+              schedule["last_updated"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+              with open(SCHEDULE_FILE_PATH, 'w', encoding='utf-8') as f:
+                  json.dump(schedule, f, indent=2, ensure_ascii=False)
+
+          def get_next_schedule_time():
+              schedule = load_schedule()
+              now = datetime.datetime.now(datetime.timezone.utc)
+              
+              if schedule.get("scheduled_videos"):
+                  first = schedule["scheduled_videos"][0]
+                  pt = datetime.datetime.strptime(first["publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+                  if pt > now:
+                      return pt, first
+              
+              day_offset = schedule.get("current_day_index", 0)
+              hour_offset = schedule.get("current_hour_index", 0)
+              
+              target_date = now.date()
+              
+              if hour_offset >= len(PUBLISH_HOURS):
+                  hour_offset = 0
+                  day_offset += 1
+                  target_date += datetime.timedelta(days=day_offset)
+              
+              target_hour = PUBLISH_HOURS[hour_offset]
+              publish_time = datetime.datetime.combine(target_date, datetime.time(target_hour, 0, tzinfo=datetime.timezone.utc))
+              
+              if publish_time <= now:
+                  hour_offset += 1
+                  if hour_offset >= len(PUBLISH_HOURS):
+                      hour_offset = 0
+                      day_offset += 1
+                      target_date += datetime.timedelta(days=day_offset)
+                      publish_time = datetime.datetime.combine(target_date, datetime.time(PUBLISH_HOURS[0], 0, tzinfo=datetime.timezone.utc))
+                  else:
+                      publish_time = datetime.datetime.combine(target_date, datetime.time(PUBLISH_HOURS[hour_offset], 0, tzinfo=datetime.timezone.utc))
+              
+              schedule["current_day_index"] = day_offset
+              schedule["current_hour_index"] = hour_offset + 1 if hour_offset + 1 < len(PUBLISH_HOURS) else 0
+              if hour_offset + 1 >= len(PUBLISH_HOURS):
+                  schedule["current_day_index"] = day_offset + 1
+              
+              save_schedule(schedule)
+              return publish_time, None
+
+          def add_to_schedule(video_title, video_path, clip_index):
+              schedule = load_schedule()
+              publish_time, _ = get_next_schedule_time()
+              
+              scheduled = {
+                  "id": f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{clip_index}",
+                  "title": video_title,
+                  "video_path": video_path,
+                  "publish_time": publish_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "status": "scheduled"
+              }
+              
+              schedule["scheduled_videos"].append(scheduled)
+              save_schedule(schedule)
+              log_message(f"📅 Scheduled: {video_title} at {scheduled['publish_time']}")
+              return scheduled
+
           # ========== المعالجة الرئيسية ==========
-          def process_single_video(youtube_url, video_index):
-              print(f"\n{'='*60}\nProcessing: {youtube_url}\n{'='*60}")
+          def process_video(youtube_url):
+              log_message(f"\n{'='*60}\nProcessing: {youtube_url}\n{'='*60}")
               
-              # تحميل الفيديو
-              with open(COOKIES_FILE, "w") as f: f.write(COOKIES_TEXT)
+              # 1. التحقق من وجود ترجمة أولاً
+              if not check_subtitles(youtube_url):
+                  log_message("❌ Video skipped: No Arabic subtitles available")
+                  return False
+              
+              # 2. تحميل الفيديو
+              log_message("📥 Downloading video...")
+              with open(COOKIES_FILE, "w") as f:
+                  f.write(COOKIES_TEXT)
+              
               if not run_cmd(["yt-dlp", "--cookies", COOKIES_FILE, "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", TEMP_VIDEO, youtube_url]):
-                  print("❌ Download failed"); return False
-              
-              video_duration = get_duration(TEMP_VIDEO)
-              
-              # استخراج الترجمة
-              if not run_cmd(["yt-dlp", "--cookies", COOKIES_FILE, "--skip-download", "--write-auto-sub", "--sub-lang", "ar", "--output", SUB_OUTPUT, youtube_url]):
-                  print("❌ Subtitle extraction failed"); os.remove(COOKIES_FILE); return False
+                  log_message("❌ Download failed")
+                  if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
+                  return False
               
               os.remove(COOKIES_FILE)
+              video_duration = get_duration(TEMP_VIDEO)
+              log_message(f"📹 Duration: {seconds_to_time(video_duration)}")
               
+              # 3. الحصول على الترجمة
               if not os.path.exists(EXPECTED_VTT):
-                  print("❌ No Arabic subtitles found"); return False
+                  log_message("❌ Subtitle file not found")
+                  return False
               
-              # معالجة الترجمة
               with open(EXPECTED_VTT, "r") as f:
                   lines = [line.strip() for line in f if line.strip() and not any(x in line for x in ['WEBVTT', 'Kind:', 'Language:', '-->'])]
-              with open(FINAL_TRANSCRIPT, "w") as f: f.write('\n'.join(lines))
+              with open(FINAL_TRANSCRIPT, "w") as f:
+                  f.write('\n'.join(lines))
               
-              # Gemini
-              response = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}", 
-                                      headers={"Content-Type": "application/json"},
-                                      json={"contents": [{"parts": [{"text": get_gemini_prompt(open(FINAL_TRANSCRIPT).read())}]}]})
-              if response.status_code != 200: return False
+              # 4. Gemini
+              log_message("🤖 Analyzing with Gemini...")
+              with open(FINAL_TRANSCRIPT, "r") as f:
+                  transcript_data = f.read()
+              
+              response = requests.post(
+                  f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}",
+                  headers={"Content-Type": "application/json"},
+                  json={"contents": [{"parts": [{"text": get_gemini_prompt(transcript_data)}]}]}
+              )
+              
+              if response.status_code != 200:
+                  log_message(f"❌ Gemini error: {response.status_code}")
+                  return False
               
               gemini_result = response.json()['candidates'][0]['content']['parts'][0]['text']
               
-              # استخراج المقاطع
+              # 5. استخراج المقاطع
               clips = []
               for line in gemini_result.strip().split('\n'):
                   if '|' in line:
@@ -607,28 +635,39 @@ jobs:
                       if len(parts) >= 3:
                           new_start, new_end = adjust_timestamp(parts[0], parts[1], video_duration)
                           clips.append({'start': new_start, 'end': new_end, 'title': parts[2]})
+                          log_message(f"  📍 Clip: {parts[0]}→{parts[1]} => {new_start}→{new_end}")
               
-              if not clips: return False
+              if not clips:
+                  log_message("❌ No clips found")
+                  return False
               
-              # معالجة كل مقطع وإضافته إلى الجدولة
+              # 6. معالجة المقاطع
               for idx, clip in enumerate(clips, 1):
+                  log_message(f"\n🎬 Clip {idx}/{len(clips)}: {clip['title']}")
                   safe_name = "".join(c for c in clip['title'] if c.isalnum() or c == ' ').replace(' ', '_')[:100]
-                  raw_clip = f"raw_{video_index}_{idx}.mp4"
-                  vad_clip = f"vad_{video_index}_{idx}.mp4"
-                  img_path = f"img_{video_index}_{idx}.png"
+                  raw_clip = f"raw_{idx}.mp4"
+                  vad_clip = f"vad_{idx}.mp4"
+                  img_path = f"img_{idx}.png"
                   output_path = f"{idx:02d}_{safe_name}.mp4"
                   
-                  if not extract_clip(TEMP_VIDEO, clip['start'], clip['end'], raw_clip): continue
+                  if not extract_clip(TEMP_VIDEO, clip['start'], clip['end'], raw_clip):
+                      log_message("  ❌ Cut failed")
+                      continue
+                  
                   remove_silence_from_video(raw_clip, vad_clip)
-                  if not create_image_with_title(clip['title'], img_path): continue
+                  
+                  if not create_image_with_title(clip['title'], img_path):
+                      log_message("  ❌ Image creation failed")
+                      continue
+                  
                   if process_tiktok_reel(vad_clip, img_path, output_path):
-                      # إرسال إلى تليجرام فوراً
+                      log_message(f"  ✅ Merged successfully")
                       send_video(output_path, clip['title'])
                       
-                      # إضافة إلى جدولة YouTube
-                      scheduled = add_to_schedule(clip['title'], output_path, f"{video_index}_{idx}")
-                      # رفع الفيديو إلى YouTube مع وقت الجدولة
+                      scheduled = add_to_schedule(clip['title'], output_path, idx)
                       upload_to_youtube(output_path, clip['title'], scheduled["publish_time"])
+                  else:
+                      log_message("  ❌ Merge failed")
                   
                   for f in [raw_clip, vad_clip, img_path, output_path]:
                       if os.path.exists(f): os.remove(f)
@@ -637,62 +676,53 @@ jobs:
               return True
 
           # ========== التشغيل ==========
-          print("="*60)
-          print("YouTube Ultimate QA Extractor - Batch Process")
-          print(f"Publishing hours (UTC): {PUBLISH_HOURS}")
-          print("="*60)
+          log_message("="*60)
+          log_message("YouTube Ultimate QA Extractor - Daily Schedule Mode")
+          log_message(f"Run at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+          log_message("="*60)
           
-          # التحقق من وجود التوكنات المطلوبة
+          # التحقق من المتطلبات
           if not GITHUB_TOKEN:
-              print("❌ GITHUB_TOKEN not found!")
+              log_message("❌ GITHUB_TOKEN not found!")
               sys.exit(1)
           
           if not COOKIES_TEXT:
-              print("❌ COOKIES_TEXT not found!")
+              log_message("❌ COOKIES_TEXT not found!")
               sys.exit(1)
           
           if not GEMINI_KEY:
-              print("❌ GEMINI_API_KEY not found!")
+              log_message("❌ GEMINI_API_KEY not found!")
               sys.exit(1)
           
-          # تحميل الجدولة الحالية
-          schedule = load_schedule()
-          print(f"📅 Current schedule loaded. Published: {len(schedule.get('published_videos', []))}, Scheduled: {len(schedule.get('scheduled_videos', []))}")
+          # الحصول على أول رابط
+          first_url, remaining_urls, file_sha = get_first_url()
           
-          # الحصول على الروابط
-          urls_to_process, file_sha = get_remaining_urls()
-          if not urls_to_process:
-              print("✅ No URLs found in videos.txt")
-              print("📊 Final Schedule Status:")
-              print(f"   - Published videos: {len(schedule.get('published_videos', []))}")
-              print(f"   - Scheduled videos: {len(schedule.get('scheduled_videos', []))}")
+          if not first_url:
+              log_message("✅ No videos to process today")
               sys.exit(0)
           
-          # معالجة الروابط
-          for video_index, url in enumerate(urls_to_process[:]):
-              print(f"\n--- Processing video {video_index + 1}/{len(urls_to_process)}: {url} ---")
-              success = process_single_video(url, video_index)
-              urls_to_process.remove(url)
-              
-              if not update_videos_file(urls_to_process, file_sha):
-                  print("❌ Failed to update videos.txt")
-                  sys.exit(1)
-              
-              # تحديث SHA للمرة القادمة
-              _, file_sha = get_remaining_urls()
-              print(f"Remaining: {len(urls_to_process)}")
+          # معالجة الفيديو
+          log_message(f"\n🚀 Processing: {first_url}")
+          success = process_video(first_url)
           
-          # عرض التقرير النهائي
+          # حذف الرابط فقط إذا نجحت المعالجة بالكامل
+          if success:
+              if update_videos_file(remaining_urls, file_sha):
+                  log_message(f"\n✅ Video processed successfully and removed from list!")
+              else:
+                  log_message(f"\n⚠️ Video processed but failed to update list")
+          else:
+              log_message(f"\n❌ Video processing failed. URL remains in videos.txt")
+              log_message("⚠️ Please check the video manually")
+              sys.exit(1)
+          
+          # عرض حالة الجدولة
           schedule = load_schedule()
-          print("\n" + "="*60)
-          print("🏁 Batch processing complete!")
-          print(f"📊 Final Schedule Status:")
-          print(f"   - Published videos: {len(schedule.get('published_videos', []))}")
-          print(f"   - Scheduled videos: {len(schedule.get('scheduled_videos', []))}")
-          
-          # عرض الفيديوهات المجدولة
+          log_message(f"\n📊 Schedule Status:")
+          log_message(f"   - Scheduled videos: {len(schedule.get('scheduled_videos', []))}")
           if schedule.get('scheduled_videos'):
-              print("\n📅 Scheduled Videos:")
-              for video in schedule['scheduled_videos']:
-                  print(f"   - {video['title']} at {video['publish_time']}")
-          print("="*60)
+              log_message("\n📅 Next scheduled videos:")
+              for v in schedule['scheduled_videos'][:3]:
+                  log_message(f"   - {v['title']} at {v['publish_time']}")
+          
+          log_message("\n🏁 Daily job completed successfully!")
