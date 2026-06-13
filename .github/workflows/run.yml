@@ -1,9 +1,8 @@
-name: YouTube Ultimate QA Extractor - Daily Schedule
-
 on:
   schedule:
+    # يعمل كل 3 أيام في الساعة 00:00 (12 منتصف الليل) بالتوقيت العالمي UTC
     - cron: '0 0 */3 * *'
-  crow_dispatch:
+  workflow_dispatch:
     inputs:
       telegram_target:
         description: 'Telegram Channel/User ID'
