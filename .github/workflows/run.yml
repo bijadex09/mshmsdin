@@ -57,9 +57,9 @@ jobs:
           import re
           import asyncio
           import datetime
+          import base64
           from typing import List, Tuple
           from telethon import TelegramClient
-          from github import Github
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
           from google.auth.transport.requests import Request as AuthRequest
@@ -117,6 +117,102 @@ jobs:
           END_OFFSET = 5
           TELEGRAM_LIMIT = 20 * 1024 * 1024
 
+          # ========== دوال GitHub API باستخدام requests فقط ==========
+          def get_github_headers():
+              """إعداد headers لـ GitHub API"""
+              return {
+                  "Authorization": f"Bearer {GITHUB_TOKEN}",
+                  "Accept": "application/vnd.github.v3+json"
+              }
+
+          def get_remaining_urls():
+              """قراءة الروابط من GitHub باستخدام requests"""
+              url = f"https://api.github.com/repos/{REPO_NAME}/contents/{VIDEOS_FILE_PATH}"
+              headers = get_github_headers()
+              
+              try:
+                  response = requests.get(url, headers=headers)
+                  if response.status_code == 200:
+                      data = response.json()
+                      content = base64.b64decode(data['content']).decode('utf-8')
+                      urls = [line.strip() for line in content.splitlines() if line.strip()]
+                      print(f"✅ Loaded {len(urls)} URLs from videos.txt")
+                      return urls, data['sha']
+                  else:
+                      print(f"❌ Failed to read videos.txt: {response.status_code}")
+                      return [], None
+              except Exception as e:
+                  print(f"❌ Error reading videos.txt: {e}")
+                  return [], None
+
+          def update_videos_file(remaining_urls, current_sha):
+              """تحديث ملف videos.txt على GitHub"""
+              if not current_sha:
+                  print("❌ No SHA reference for videos.txt")
+                  return False
+              
+              url = f"https://api.github.com/repos/{REPO_NAME}/contents/{VIDEOS_FILE_PATH}"
+              headers = get_github_headers()
+              
+              new_content = "\n".join(remaining_urls)
+              if new_content and not new_content.endswith('\n'):
+                  new_content += '\n'
+              
+              data = {
+                  "message": f"Update videos.txt - Remaining: {len(remaining_urls)}",
+                  "content": base64.b64encode(new_content.encode()).decode(),
+                  "sha": current_sha
+              }
+              
+              try:
+                  response = requests.put(url, headers=headers, json=data)
+                  if response.status_code == 200:
+                      print(f"✅ Updated videos.txt successfully")
+                      return True
+                  else:
+                      print(f"❌ Failed to update videos.txt: {response.status_code}")
+                      return False
+              except Exception as e:
+                  print(f"❌ Error updating videos.txt: {e}")
+                  return False
+
+          def upload_schedule_to_github():
+              """رفع ملف الجدولة إلى GitHub"""
+              if not GITHUB_TOKEN or not REPO_NAME:
+                  return
+              
+              url = f"https://api.github.com/repos/{REPO_NAME}/contents/{SCHEDULE_FILE_PATH}"
+              headers = get_github_headers()
+              
+              with open(SCHEDULE_FILE_PATH, 'r', encoding='utf-8') as f:
+                  content = f.read()
+              
+              # الحصول على SHA الحالي إذا كان الملف موجوداً
+              response = requests.get(url, headers=headers)
+              current_sha = None
+              if response.status_code == 200:
+                  current_sha = response.json().get('sha')
+              
+              data = {
+                  "message": "Update schedule",
+                  "content": base64.b64encode(content.encode()).decode()
+              }
+              if current_sha:
+                  data["sha"] = current_sha
+              
+              try:
+                  if current_sha:
+                      response = requests.put(url, headers=headers, json=data)
+                  else:
+                      response = requests.put(url, headers=headers, json=data)
+                  
+                  if response.status_code in [200, 201]:
+                      print(f"✅ Schedule saved to GitHub")
+                  else:
+                      print(f"⚠️ Failed to upload schedule: {response.status_code}")
+              except Exception as e:
+                  print(f"⚠️ Failed to upload schedule: {e}")
+
           # ========== دوال إدارة الجدولة ==========
           def load_schedule():
               """تحميل ملف الجدولة، وإنشائه إذا لم يكن موجوداً"""
@@ -144,29 +240,7 @@ jobs:
               schedule["last_updated"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
               with open(SCHEDULE_FILE_PATH, 'w', encoding='utf-8') as f:
                   json.dump(schedule, f, indent=2, ensure_ascii=False)
-              # رفع الملف إلى GitHub
               upload_schedule_to_github()
-
-          def upload_schedule_to_github():
-              """رفع ملف الجدولة إلى GitHub"""
-              if not GITHUB_TOKEN or not REPO_NAME:
-                  return
-              try:
-                  g = Github(GITHUB_TOKEN)
-                  repo = g.get_repo(REPO_NAME)
-                  with open(SCHEDULE_FILE_PATH, 'r', encoding='utf-8') as f:
-                      content = f.read()
-                  
-                  try:
-                      # محاولة تحديث الملف إذا كان موجوداً
-                      contents = repo.get_contents(SCHEDULE_FILE_PATH)
-                      repo.update_file(SCHEDULE_FILE_PATH, "Update schedule", content, contents.sha)
-                  except:
-                      # إنشاء الملف إذا لم يكن موجوداً
-                      repo.create_file(SCHEDULE_FILE_PATH, "Create schedule file", content)
-                  print(f"✅ Schedule saved to GitHub")
-              except Exception as e:
-                  print(f"⚠️ Failed to upload schedule: {e}")
 
           def get_next_schedule_time():
               """الحصول على موعد النشر التالي بناءً على الجدولة"""
@@ -238,34 +312,6 @@ jobs:
               
               print(f"📅 Scheduled: {video_title} at {scheduled_video['publish_time']}")
               return scheduled_video
-
-          def get_videos_to_publish():
-              """الحصول على الفيديوهات التي حان وقت نشرها"""
-              schedule = load_schedule()
-              now = datetime.datetime.now(datetime.timezone.utc)
-              
-              to_publish = []
-              remaining = []
-              
-              for video in schedule.get("scheduled_videos", []):
-                  publish_time = datetime.datetime.strptime(video["publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-                  if publish_time <= now:
-                      to_publish.append(video)
-                  else:
-                      remaining.append(video)
-              
-              schedule["scheduled_videos"] = remaining
-              save_schedule(schedule)
-              
-              return to_publish
-
-          def mark_as_published(video):
-              """تحديد فيديو كمنشور"""
-              schedule = load_schedule()
-              video["status"] = "published"
-              video["published_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-              schedule["published_videos"].append(video)
-              save_schedule(schedule)
 
           # ========== دوال التحميل الأساسية ==========
           def download_file(url, dest):
@@ -469,7 +515,9 @@ jobs:
               )
               
               if creds.expired:
+                  print("🔄 Refreshing YouTube token...")
                   creds.refresh(AuthRequest())
+                  print("✅ YouTube token refreshed")
               
               return build('youtube', 'v3', credentials=creds)
 
@@ -502,28 +550,6 @@ jobs:
               except Exception as e:
                   print(f"❌ YouTube upload error: {e}")
               return None
-
-          # ========== دوال GitHub ==========
-          def get_remaining_urls():
-              g = Github(GITHUB_TOKEN)
-              repo = g.get_repo(REPO_NAME)
-              try:
-                  contents = repo.get_contents(VIDEOS_FILE_PATH)
-                  urls = [line.strip() for line in contents.decoded_content.decode('utf-8').splitlines() if line.strip()]
-                  print(f"✅ Loaded {len(urls)} URLs")
-                  return urls, contents.sha
-              except: return [], None
-
-          def update_videos_file(remaining_urls, current_sha):
-              if not current_sha: return False
-              g = Github(GITHUB_TOKEN)
-              repo = g.get_repo(REPO_NAME)
-              new_content = "\n".join(remaining_urls)
-              if new_content and not new_content.endswith('\n'): new_content += '\n'
-              try:
-                  repo.update_file(VIDEOS_FILE_PATH, f"Update - Remaining: {len(remaining_urls)}", new_content, current_sha)
-                  return True
-              except: return False
 
           # ========== دوال Gemini ==========
           def get_gemini_prompt(transcript):
@@ -616,6 +642,19 @@ jobs:
           print(f"Publishing hours (UTC): {PUBLISH_HOURS}")
           print("="*60)
           
+          # التحقق من وجود التوكنات المطلوبة
+          if not GITHUB_TOKEN:
+              print("❌ GITHUB_TOKEN not found!")
+              sys.exit(1)
+          
+          if not COOKIES_TEXT:
+              print("❌ COOKIES_TEXT not found!")
+              sys.exit(1)
+          
+          if not GEMINI_KEY:
+              print("❌ GEMINI_API_KEY not found!")
+              sys.exit(1)
+          
           # تحميل الجدولة الحالية
           schedule = load_schedule()
           print(f"📅 Current schedule loaded. Published: {len(schedule.get('published_videos', []))}, Scheduled: {len(schedule.get('scheduled_videos', []))}")
@@ -639,6 +678,7 @@ jobs:
                   print("❌ Failed to update videos.txt")
                   sys.exit(1)
               
+              # تحديث SHA للمرة القادمة
               _, file_sha = get_remaining_urls()
               print(f"Remaining: {len(urls_to_process)}")
           
@@ -646,7 +686,6 @@ jobs:
           schedule = load_schedule()
           print("\n" + "="*60)
           print("🏁 Batch processing complete!")
-          print(f"✅ Videos processed: {len(urls_to_process)}")
           print(f"📊 Final Schedule Status:")
           print(f"   - Published videos: {len(schedule.get('published_videos', []))}")
           print(f"   - Scheduled videos: {len(schedule.get('scheduled_videos', []))}")
