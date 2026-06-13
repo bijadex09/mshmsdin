@@ -85,7 +85,7 @@ jobs:
           YOUTUBE_REFRESH_TOKEN = os.environ.get('YOUTUBE_REFRESH_TOKEN', '')
           
           VIDEOS_FILE_PATH = "videos.txt"
-          SCHEDULE_FILE_PATH = "schedule.json"
+          LAST_PUBLISH_FILE = "last_publish.json"  # ملف بسيط لحفظ آخر وقت نشر
           BASE_DIR = os.getcwd()
           TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
           COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
@@ -94,7 +94,7 @@ jobs:
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
 
           # أوقات النشر (بالتوقيت العالمي UTC) - تقابل توقيت الجزائر UTC+1
-          PUBLISH_HOURS = [11, 14, 17, 20, 22]
+          PUBLISH_HOURS = [11, 14, 17, 20, 22]  # 12, 15, 18, 21, 23 بتوقيت الجزائر
 
           # الحد الأقصى لمدة المقطع (3 دقائق = 180 ثانية)
           MAX_CLIP_DURATION = 180
@@ -122,6 +122,132 @@ jobs:
           START_OFFSET = -3
           END_OFFSET = 5
           TELEGRAM_LIMIT = 20 * 1024 * 1024
+
+          # ========== دوال حفظ آخر وقت نشر ==========
+          def load_last_publish():
+              """تحميل آخر وقت نشر من ملف JSON"""
+              if os.path.exists(LAST_PUBLISH_FILE):
+                  try:
+                      with open(LAST_PUBLISH_FILE, 'r', encoding='utf-8') as f:
+                          data = json.load(f)
+                          return data.get("last_publish_time")
+                  except:
+                      pass
+              return None
+
+          def save_last_publish(publish_time_str):
+              """حفظ آخر وقت نشر في ملف JSON"""
+              data = {
+                  "last_publish_time": publish_time_str,
+                  "last_updated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+              }
+              with open(LAST_PUBLISH_FILE, 'w', encoding='utf-8') as f:
+                  json.dump(data, f, indent=2, ensure_ascii=False)
+              
+              # رفع الملف إلى GitHub
+              upload_last_publish_to_github()
+
+          def upload_last_publish_to_github():
+              """رفع ملف آخر وقت نشر إلى GitHub"""
+              if not GITHUB_TOKEN or not REPO_NAME:
+                  return
+              
+              url = f"https://api.github.com/repos/{REPO_NAME}/contents/{LAST_PUBLISH_FILE}"
+              headers = {
+                  "Authorization": f"Bearer {GITHUB_TOKEN}",
+                  "Accept": "application/vnd.github.v3+json"
+              }
+              
+              with open(LAST_PUBLISH_FILE, 'r', encoding='utf-8') as f:
+                  content = f.read()
+              
+              # الحصول على SHA الحالي
+              response = requests.get(url, headers=headers)
+              current_sha = None
+              if response.status_code == 200:
+                  current_sha = response.json().get('sha')
+              
+              data = {
+                  "message": "Update last publish time",
+                  "content": base64.b64encode(content.encode()).decode()
+              }
+              if current_sha:
+                  data["sha"] = current_sha
+              
+              try:
+                  requests.put(url, headers=headers, json=data)
+                  print(f"✅ Last publish time saved to GitHub")
+              except Exception as e:
+                  print(f"⚠️ Failed to upload: {e}")
+
+          def get_next_publish_time():
+              """الحصول على وقت النشر التالي بناءً على آخر وقت نشر"""
+              last_publish = load_last_publish()
+              now = datetime.datetime.now(datetime.timezone.utc)
+              
+              if last_publish:
+                  # تحويل آخر وقت نشر إلى datetime
+                  last_time = datetime.datetime.strptime(last_publish, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+                  last_hour = last_time.hour
+                  last_date = last_time.date()
+                  
+                  # البحث عن الساعة التالية
+                  try:
+                      current_index = PUBLISH_HOURS.index(last_hour)
+                      next_index = current_index + 1
+                  except ValueError:
+                      next_index = 0
+                  
+                  # إذا وصلنا إلى نهاية اليوم
+                  if next_index >= len(PUBLISH_HOURS):
+                      next_date = last_date + datetime.timedelta(days=1)
+                      next_hour = PUBLISH_HOURS[0]
+                  else:
+                      next_date = last_date
+                      next_hour = PUBLISH_HOURS[next_index]
+                  
+                  publish_time = datetime.datetime.combine(next_date, datetime.time(next_hour, 0, tzinfo=datetime.timezone.utc))
+                  
+                  # إذا كان الوقت المحسوب في الماضي (بسبب تأخير)، انتقل للساعة التالية
+                  while publish_time <= now:
+                      try:
+                          current_index = PUBLISH_HOURS.index(publish_time.hour)
+                          next_index = current_index + 1
+                      except ValueError:
+                          next_index = 0
+                      
+                      if next_index >= len(PUBLISH_HOURS):
+                          publish_time = datetime.datetime.combine(publish_time.date() + datetime.timedelta(days=1), datetime.time(PUBLISH_HOURS[0], 0, tzinfo=datetime.timezone.utc))
+                      else:
+                          publish_time = datetime.datetime.combine(publish_time.date(), datetime.time(PUBLISH_HOURS[next_index], 0, tzinfo=datetime.timezone.utc))
+                  
+              else:
+                  # أول مرة: ابدأ من أقرب وقت قادم
+                  now_hour = now.hour
+                  now_date = now.date()
+                  
+                  next_hour = None
+                  for hour in PUBLISH_HOURS:
+                      if hour > now_hour:
+                          next_hour = hour
+                          break
+                  
+                  if next_hour is None:
+                      next_date = now_date + datetime.timedelta(days=1)
+                      next_hour = PUBLISH_HOURS[0]
+                  else:
+                      next_date = now_date
+                  
+                  publish_time = datetime.datetime.combine(next_date, datetime.time(next_hour, 0, tzinfo=datetime.timezone.utc))
+              
+              # حفظ هذا الوقت كآخر وقت مجدول (سيتم تحديثه بعد الرفع الفعلي)
+              return publish_time
+
+          def update_last_publish(publish_time):
+              """تحديث آخر وقت نشر بعد رفع الفيديو بنجاح"""
+              save_last_publish(publish_time.strftime("%Y-%m-%dT%H:%M:%SZ"))
+              algiers_time = publish_time + datetime.timedelta(hours=1)
+              print(f"✅ Updated last publish time to: {algiers_time.strftime('%H:%M')} (توقيت الجزائر)")
 
           # ========== دوال GitHub API ==========
           def get_github_headers():
@@ -295,7 +421,6 @@ jobs:
 
           # ========== دوال إنشاء الصور ==========
           def truncate_title(title, max_words=10):
-              """تحديد طول العنوان إلى 10 كلمات كحد أقصى"""
               words = title.strip().split()
               if len(words) > max_words:
                   truncated = ' '.join(words[:max_words])
@@ -317,7 +442,6 @@ jobs:
               return [" ".join(words[:half]), " ".join(words[half:])]
 
           def create_image_with_title(text, output_path):
-              # تحديد العنوان إلى 10 كلمات
               text = truncate_title(text, max_words=10)
               word_count = len(text.strip().split())
               
@@ -486,7 +610,7 @@ jobs:
                       },
                       'status': {
                           'privacyStatus': 'private',
-                          'publishAt': publish_time,
+                          'publishAt': publish_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                           'selfDeclaredMadeForKids': False
                       }
                   }
@@ -496,7 +620,7 @@ jobs:
                   response = request.execute()
                   
                   if response and response.get('id'):
-                      algiers_time = datetime.datetime.strptime(publish_time, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc) + datetime.timedelta(hours=1)
+                      algiers_time = publish_time + datetime.timedelta(hours=1)
                       print(f"✅ YouTube scheduled! Video ID: {response['id']} at {algiers_time.strftime('%H:%M')} (توقيت الجزائر)")
                       return response['id']
               except Exception as e:
@@ -546,153 +670,6 @@ jobs:
                       time.sleep(5)
               
               return None
-
-          # ========== دوال الجدولة ==========
-          def load_schedule():
-              """تحميل ملف الجدولة، وإنشائه إذا لم يكن موجوداً"""
-              if os.path.exists(SCHEDULE_FILE_PATH):
-                  try:
-                      with open(SCHEDULE_FILE_PATH, 'r', encoding='utf-8') as f:
-                          return json.load(f)
-                  except:
-                      pass
-              
-              # إنشاء ملف جدولة جديد
-              now = datetime.datetime.now(datetime.timezone.utc)
-              schedule = {
-                  "last_updated": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                  "last_publish_time": None,
-                  "last_publish_date": None,
-                  "scheduled_videos": [],
-                  "published_videos": []
-              }
-              save_schedule(schedule)
-              return schedule
-
-          def save_schedule(schedule):
-              """حفظ ملف الجدولة"""
-              schedule["last_updated"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-              with open(SCHEDULE_FILE_PATH, 'w', encoding='utf-8') as f:
-                  json.dump(schedule, f, indent=2, ensure_ascii=False)
-              
-              # رفع الملف إلى GitHub
-              try:
-                  upload_schedule_to_github()
-              except:
-                  pass
-
-          def upload_schedule_to_github():
-              """رفع ملف الجدولة إلى GitHub"""
-              if not GITHUB_TOKEN or not REPO_NAME:
-                  return
-              
-              url = f"https://api.github.com/repos/{REPO_NAME}/contents/{SCHEDULE_FILE_PATH}"
-              headers = get_github_headers()
-              
-              with open(SCHEDULE_FILE_PATH, 'r', encoding='utf-8') as f:
-                  content = f.read()
-              
-              response = requests.get(url, headers=headers)
-              current_sha = None
-              if response.status_code == 200:
-                  current_sha = response.json().get('sha')
-              
-              data = {
-                  "message": "Update schedule",
-                  "content": base64.b64encode(content.encode()).decode()
-              }
-              if current_sha:
-                  data["sha"] = current_sha
-              
-              try:
-                  requests.put(url, headers=headers, json=data)
-                  print(f"✅ Schedule uploaded to GitHub")
-              except Exception as e:
-                  print(f"⚠️ Failed to upload schedule: {e}")
-
-          def get_next_schedule_time():
-              """الحصول على موعد النشر التالي بناءً على آخر وقت نشر"""
-              schedule = load_schedule()
-              now = datetime.datetime.now(datetime.timezone.utc)
-              
-              last_publish_time_str = schedule.get("last_publish_time")
-              
-              if last_publish_time_str:
-                  last_publish = datetime.datetime.strptime(last_publish_time_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-                  last_hour = last_publish.hour
-                  last_date = last_publish.date()
-                  
-                  try:
-                      current_index = PUBLISH_HOURS.index(last_hour)
-                      next_index = current_index + 1
-                  except ValueError:
-                      next_index = 0
-                  
-                  if next_index >= len(PUBLISH_HOURS):
-                      next_date = last_date + datetime.timedelta(days=1)
-                      next_hour = PUBLISH_HOURS[0]
-                  else:
-                      next_date = last_date
-                      next_hour = PUBLISH_HOURS[next_index]
-                  
-                  publish_time = datetime.datetime.combine(next_date, datetime.time(next_hour, 0, tzinfo=datetime.timezone.utc))
-                  save_schedule(schedule)
-                  
-                  algiers_time = publish_time + datetime.timedelta(hours=1)
-                  print(f"📅 Next slot: {next_hour}:00 UTC ({algiers_time.strftime('%H:%M')} توقيت الجزائر) on {next_date}")
-                  return publish_time
-              
-              # إذا لم يكن هناك وقت نشر سابق
-              now_hour = now.hour
-              now_date = now.date()
-              
-              next_hour = None
-              for hour in PUBLISH_HOURS:
-                  if hour > now_hour:
-                      next_hour = hour
-                      break
-              
-              if next_hour is None:
-                  next_date = now_date + datetime.timedelta(days=1)
-                  next_hour = PUBLISH_HOURS[0]
-              else:
-                  next_date = now_date
-              
-              publish_time = datetime.datetime.combine(next_date, datetime.time(next_hour, 0, tzinfo=datetime.timezone.utc))
-              
-              algiers_time = publish_time + datetime.timedelta(hours=1)
-              print(f"📅 First slot: {next_hour}:00 UTC ({algiers_time.strftime('%H:%M')} توقيت الجزائر) on {next_date}")
-              return publish_time
-
-          def update_last_publish_time(publish_time_str):
-              """تحديث آخر وقت نشر بعد رفع الفيديو بنجاح"""
-              schedule = load_schedule()
-              schedule["last_publish_time"] = publish_time_str
-              schedule["last_publish_date"] = datetime.datetime.strptime(publish_time_str, "%Y-%m-%dT%H:%M:%SZ").date().strftime("%Y-%m-%d")
-              save_schedule(schedule)
-              publish_dt = datetime.datetime.strptime(publish_time_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-              algiers_time = publish_dt + datetime.timedelta(hours=1)
-              print(f"✅ Updated last publish time to: {algiers_time.strftime('%H:%M')} (توقيت الجزائر)")
-
-          def add_to_schedule(video_title, video_path, clip_index):
-              """إضافة فيديو إلى جدولة النشر"""
-              schedule = load_schedule()
-              publish_time = get_next_schedule_time()
-              
-              scheduled = {
-                  "id": f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{clip_index}",
-                  "title": video_title,
-                  "video_path": video_path,
-                  "publish_time": publish_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                  "status": "scheduled"
-              }
-              
-              schedule["scheduled_videos"].append(scheduled)
-              save_schedule(schedule)
-              
-              algiers_time = publish_time + datetime.timedelta(hours=1)
-              print(f"📅 Scheduled: {video_title} at {algiers_time.strftime('%H:%M')} (توقيت الجزائر)")
-              return scheduled
 
           # ========== المعالجة الرئيسية ==========
           def process_video(youtube_url):
@@ -790,12 +767,10 @@ jobs:
                           title = parts[2].strip()
                           new_start, new_end = adjust_timestamp(original_start, original_end, video_duration)
                           
-                          # حساب مدة المقطع بالثواني
                           start_sec = time_to_seconds(new_start)
                           end_sec = time_to_seconds(new_end)
                           duration_sec = end_sec - start_sec
                           
-                          # التحقق: تخطي المقاطع الأطول من 3 دقائق
                           if duration_sec > MAX_CLIP_DURATION:
                               print(f"  ⏭️ Skipping clip (duration {duration_sec:.0f}s > {MAX_CLIP_DURATION}s): {title}")
                               skipped_count += 1
@@ -808,13 +783,20 @@ jobs:
                   print(f"⚠️ Skipped {skipped_count} clip(s) because they exceeded {MAX_CLIP_DURATION}s limit")
               
               if not clips:
-                  print("⚠️ No valid clips found (all clips were too long or none found)")
+                  print("⚠️ No valid clips found")
                   return False
               
-              # 6. معالجة المقاطع (فقط المقاطع التي اجتازت التصفية)
+              # 6. معالجة المقاطع ورفعها مباشرة (كل مقطع في وقته المحدد)
               print(f"🚀 Starting processing for {len(clips)} clips...")
+              
               for idx, clip in enumerate(clips, 1):
-                  print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']} (duration: {clip['duration']:.0f}s)")
+                  print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']} ({clip['duration']:.0f}s)")
+                  
+                  # الحصول على وقت النشر التالي لهذا المقطع
+                  publish_time = get_next_publish_time()
+                  algiers_time = publish_time + datetime.timedelta(hours=1)
+                  print(f"  📅 Scheduled for: {algiers_time.strftime('%H:%M')} (توقيت الجزائر)")
+                  
                   safe_name = "".join(c for c in clip['title'] if c.isalnum() or c == ' ').replace(' ', '_')[:100]
                   raw_clip = f"raw_{idx}.mp4"
                   vad_clip = f"vad_{idx}.mp4"
@@ -834,9 +816,15 @@ jobs:
                   if process_tiktok_reel(vad_clip, img_path, output_path):
                       size_mb = os.path.getsize(output_path) / (1024 * 1024)
                       print(f"  ✅ Merged successfully ({size_mb:.1f}MB)")
+                      
+                      # إرسال إلى تليجرام
                       send_video(output_path, clip['title'])
-                      scheduled = add_to_schedule(clip['title'], output_path, idx)
-                      upload_to_youtube(output_path, clip['title'], scheduled["publish_time"])
+                      
+                      # رفع إلى YouTube مع وقت النشر المحدد
+                      upload_to_youtube(output_path, clip['title'], publish_time)
+                      
+                      # تحديث آخر وقت نشر (بعد رفع الفيديو)
+                      update_last_publish(publish_time)
                   else:
                       print("  ❌ Merge failed")
                   
@@ -852,6 +840,15 @@ jobs:
           print(f"Max clip duration: {MAX_CLIP_DURATION} seconds (3 minutes)")
           print("="*60)
           
+          # عرض آخر وقت نشر
+          last_publish = load_last_publish()
+          if last_publish:
+              last_time = datetime.datetime.strptime(last_publish, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+              algiers_last = last_time + datetime.timedelta(hours=1)
+              print(f"📅 Last publish time: {algiers_last.strftime('%H:%M')} (توقيت الجزائر) on {last_time.date()}")
+          else:
+              print("📅 No previous publish time found. Starting fresh.")
+          
           # التحقق من المتطلبات
           if not GITHUB_TOKEN:
               print("❌ GITHUB_TOKEN not found!")
@@ -864,15 +861,6 @@ jobs:
           if not GEMINI_KEY:
               print("❌ GEMINI_API_KEY not found!")
               sys.exit(1)
-          
-          # عرض حالة الجدولة الحالية
-          schedule = load_schedule()
-          if schedule.get("last_publish_time"):
-              last_publish = datetime.datetime.strptime(schedule["last_publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-              algiers_last = last_publish + datetime.timedelta(hours=1)
-              print(f"📅 Last publish time: {algiers_last.strftime('%H:%M')} (توقيت الجزائر) on {last_publish.date()}")
-          else:
-              print("📅 No previous publish time found. Starting fresh.")
           
           # الحصول على أول رابط
           first_url, remaining_urls, file_sha = get_first_url()
@@ -895,20 +883,11 @@ jobs:
               print(f"\n❌ Video processing failed. URL remains in videos.txt")
               sys.exit(1)
           
-          # عرض حالة الجدولة النهائية
-          schedule = load_schedule()
-          print(f"\n📊 Schedule Status:")
-          print(f"   - Scheduled videos: {len(schedule.get('scheduled_videos', []))}")
-          if schedule.get("last_publish_time"):
-              last_publish = datetime.datetime.strptime(schedule["last_publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-              algiers_last = last_publish + datetime.timedelta(hours=1)
-              print(f"   - Last publish time: {algiers_last.strftime('%H:%M')} (توقيت الجزائر)")
-          
-          if schedule.get('scheduled_videos'):
-              print("\n📅 Scheduled videos (توقيت الجزائر):")
-              for v in schedule['scheduled_videos'][:5]:
-                  pub_time = datetime.datetime.strptime(v["publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-                  algiers_time = pub_time + datetime.timedelta(hours=1)
-                  print(f"   - {v['title']} at {algiers_time.strftime('%H:%M')} on {pub_time.date()}")
+          # عرض آخر وقت نشر بعد الانتهاء
+          last_publish = load_last_publish()
+          if last_publish:
+              last_time = datetime.datetime.strptime(last_publish, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+              algiers_last = last_time + datetime.timedelta(hours=1)
+              print(f"\n📊 Last publish time updated to: {algiers_last.strftime('%H:%M')} (توقيت الجزائر)")
           
           print("\n🏁 Daily job completed!")
