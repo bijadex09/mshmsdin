@@ -93,8 +93,9 @@ jobs:
           EXPECTED_VTT = os.path.join(BASE_DIR, "sub_file.ar.vtt")
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
 
-          # أوقات النشر (بالتوقيت العالمي UTC)
-          PUBLISH_HOURS = [12, 15, 18, 21, 23]
+          # أوقات النشر (بالتوقيت العالمي UTC) - تقابل توقيت الجزائر UTC+1
+          PUBLISH_HOURS = [11, 14, 17, 20, 22]  # 12, 15, 18, 21, 23 بتوقيت الجزائر
+          # ملاحظة: توقيت الجزائر = UTC+1، لذلك نطرح 1 ساعة
 
           # إعدادات الصور والخطوط
           FONT_SYSTEM_DIR = os.path.expanduser("~/.local/share/fonts")
@@ -407,7 +408,9 @@ jobs:
                   response = request.execute()
                   
                   if response and response.get('id'):
-                      print(f"✅ YouTube scheduled! Video ID: {response['id']}")
+                      # تحويل التوقيت إلى توقيت الجزائر للعرض
+                      algiers_time = datetime.datetime.strptime(publish_time, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc) + datetime.timedelta(hours=1)
+                      print(f"✅ YouTube scheduled! Video ID: {response['id']} at {algiers_time.strftime('%H:%M')} (توقيت الجزائر)")
                       return response['id']
               except Exception as e:
                   print(f"❌ YouTube error: {e}")
@@ -415,23 +418,12 @@ jobs:
 
           # ========== دوال Gemini (مع زيادة المهلة وتقليل النص) ==========
           def get_gemini_prompt(transcript):
-              return f"""الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية. النص منسق كـ 'HH:MM:SS | النص'.
+              return f"""الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية.
 
-          مهمتك: استخراج جميع الأسئلة والإجابات بدقة، مع تحديد وقت بداية السؤال ووقت نهاية الإجابة لكل مسألة.
+          استخرج جميع الأسئلة والإجابات بهذا التنسيق:
+          • START_TIME | END_TIME | عنوان السؤال
 
-          **معايير تحديد بداية السؤال (START_TIME):**
-          1. ابحث عن الكلمات المفتاحية: 'سؤال'، 'يسأل'، 'أريد أن أسأل'، 'ما حكم'، 'هل يجوز'، 'ما رأيك'
-          2. ابحث عن صيغ الاستفهام: 'هل'، 'متى'، 'كيف'، 'لماذا'، 'أين'
-
-          **معايير تحديد نهاية الإجابة (END_TIME):**
-          1. تنتهي الإجابة عندما ينتقل المتحدث إلى سؤال جديد
-          2. تنتهي عندما يقول المحاضر: 'هذا والله أعلم'، 'انتهى'
-
-          **تنسيق الإخراج الإلزامي:**
-          • [START_TIME] | [END_TIME] | [العنوان]
-
-          **ملاحظة: خذ أول 20 دقيقة فقط من النص إذا كان طويلاً**
-
+          استخدم تنسيق MM:SS للأوقات.
           ابدأ الإخراج مباشرة.
 
           النص:
@@ -442,7 +434,6 @@ jobs:
               api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
               headers = {"Content-Type": "application/json"}
               
-              # تقليل حجم النص إذا كان كبيراً جداً
               if len(text) > 25000:
                   text = text[:25000]
                   print("⚠️ Transcript truncated to 25000 characters")
@@ -453,7 +444,7 @@ jobs:
               for attempt in range(max_retries):
                   try:
                       print(f"📡 Sending to Gemini (attempt {attempt + 1}/{max_retries})...")
-                      response = requests.post(api_url, headers=headers, json=payload, timeout=180)  # 3 دقائق مهلة
+                      response = requests.post(api_url, headers=headers, json=payload, timeout=180)
                       
                       if response.status_code == 200:
                           res_json = response.json()
@@ -470,7 +461,7 @@ jobs:
               
               return None
 
-          # ========== دوال الجدولة ==========
+          # ========== دوال الجدولة المعدلة ==========
           def load_schedule():
               if os.path.exists(SCHEDULE_FILE_PATH):
                   try:
@@ -494,28 +485,59 @@ jobs:
                   json.dump(schedule, f, indent=2, ensure_ascii=False)
 
           def get_next_schedule_time():
+              """الحصول على موعد النشر التالي (يتقدم تلقائياً عبر الأوقات والأيام)"""
               schedule = load_schedule()
               now = datetime.datetime.now(datetime.timezone.utc)
               
+              # التحقق من الفيديوهات المجدولة مسبقاً
               if schedule.get("scheduled_videos"):
-                  first = schedule["scheduled_videos"][0]
-                  pt = datetime.datetime.strptime(first["publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-                  if pt > now:
-                      return pt, first
+                  # نأخذ آخر وقت مجدول (أحدث واحد)
+                  last_scheduled = schedule["scheduled_videos"][-1]
+                  last_time = datetime.datetime.strptime(last_scheduled["publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+                  
+                  # حساب الوقت التالي بعد آخر وقت مجدول
+                  try:
+                      current_hour_index = PUBLISH_HOURS.index(last_time.hour) + 1
+                  except ValueError:
+                      current_hour_index = 0
+                  current_day_offset = 0
+                  
+                  # إذا تجاوزنا آخر ساعة في اليوم، انتقل لليوم التالي
+                  if current_hour_index >= len(PUBLISH_HOURS):
+                      current_hour_index = 0
+                      current_day_offset = 1
+                  
+                  next_date = last_time.date() + datetime.timedelta(days=current_day_offset)
+                  next_hour = PUBLISH_HOURS[current_hour_index]
+                  publish_time = datetime.datetime.combine(next_date, datetime.time(next_hour, 0, tzinfo=datetime.timezone.utc))
+                  
+                  # تحديث الجدولة
+                  schedule["current_day_index"] = schedule.get("current_day_index", 0) + current_day_offset
+                  schedule["current_hour_index"] = current_hour_index + 1
+                  save_schedule(schedule)
+                  
+                  return publish_time, None
               
+              # إذا لم توجد فيديوهات مجدولة، ابدأ من الآن
               day_offset = schedule.get("current_day_index", 0)
               hour_offset = schedule.get("current_hour_index", 0)
               
+              # بدء من اليوم الحالي
               target_date = now.date()
               
+              # إذا كان اليوم الحالي قد تجاوز عدد الساعات المتبقية، انتقل لليوم التالي
               if hour_offset >= len(PUBLISH_HOURS):
                   hour_offset = 0
                   day_offset += 1
                   target_date += datetime.timedelta(days=day_offset)
               
+              # الحصول على ساعة النشر
               target_hour = PUBLISH_HOURS[hour_offset]
+              
+              # إنشاء وقت النشر
               publish_time = datetime.datetime.combine(target_date, datetime.time(target_hour, 0, tzinfo=datetime.timezone.utc))
               
+              # إذا كان الوقت قد مضى، انتقل للساعة التالية
               if publish_time <= now:
                   hour_offset += 1
                   if hour_offset >= len(PUBLISH_HOURS):
@@ -526,15 +548,18 @@ jobs:
                   else:
                       publish_time = datetime.datetime.combine(target_date, datetime.time(PUBLISH_HOURS[hour_offset], 0, tzinfo=datetime.timezone.utc))
               
+              # تحديث الجدولة
               schedule["current_day_index"] = day_offset
               schedule["current_hour_index"] = hour_offset + 1 if hour_offset + 1 < len(PUBLISH_HOURS) else 0
               if hour_offset + 1 >= len(PUBLISH_HOURS):
                   schedule["current_day_index"] = day_offset + 1
               
               save_schedule(schedule)
+              
               return publish_time, None
 
           def add_to_schedule(video_title, video_path, clip_index):
+              """إضافة فيديو إلى جدولة النشر - يوزع تلقائياً على الأوقات المتاحة"""
               schedule = load_schedule()
               publish_time, _ = get_next_schedule_time()
               
@@ -548,7 +573,10 @@ jobs:
               
               schedule["scheduled_videos"].append(scheduled)
               save_schedule(schedule)
-              print(f"📅 Scheduled: {video_title} at {scheduled['publish_time']}")
+              
+              # تحويل التوقيت إلى توقيت الجزائر للتقرير
+              algiers_time = publish_time + datetime.timedelta(hours=1)
+              print(f"📅 Scheduled: {video_title} at {algiers_time.strftime('%H:%M')} (توقيت الجزائر)")
               return scheduled
 
           # ========== المعالجة الرئيسية ==========
@@ -612,21 +640,19 @@ jobs:
                   print("❌ Transcript not found!")
                   return False
               
-              # 4. Gemini AI (مع مهلة أطول)
+              # 4. Gemini AI
               if not GEMINI_KEY:
                   print("❌ GEMINI_API_KEY missing!")
                   return False
               
               print("🤖 Sending transcript to Gemini (this may take a few minutes)...")
               
-              # قراءة الترجمة وتقليصها إذا لزم الأمر
               with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
                   transcript_data = f.read()
               
-              # إذا كان النص طويلاً جداً، خذ أول 20000 حرف فقط (حوالي 20 دقيقة)
               if len(transcript_data) > 20000:
                   transcript_data = transcript_data[:20000]
-                  print(f"⚠️ Transcript truncated to 20000 characters (from {len(transcript_data)})")
+                  print(f"⚠️ Transcript truncated to 20000 characters")
               
               gemini_result = send_to_gemini(transcript_data)
               
@@ -733,8 +759,9 @@ jobs:
           print(f"\n📊 Schedule Status:")
           print(f"   - Scheduled videos: {len(schedule.get('scheduled_videos', []))}")
           if schedule.get('scheduled_videos'):
-              print("\n📅 Next scheduled videos:")
-              for v in schedule['scheduled_videos'][:3]:
-                  print(f"   - {v['title']} at {v['publish_time']}")
+              print("\n📅 Next scheduled videos (توقيت الجزائر):")
+              for v in schedule['scheduled_videos'][:5]:
+                  algiers_time = datetime.datetime.strptime(v["publish_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc) + datetime.timedelta(hours=1)
+                  print(f"   - {v['title']} at {algiers_time.strftime('%H:%M')}")
           
           print("\n🏁 Daily job completed!")
