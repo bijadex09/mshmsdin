@@ -613,100 +613,49 @@ jobs:
                   print(f"❌ YouTube error: {e}")
               return None
 
-          # ========== دوال Gemini مع تقسيم النص (بزيادة حجم الجزء) ==========
-          def split_transcript(transcript, max_chars=100000):  # تم التعديل: من 15000 إلى 100000
-              """تقسيم النص الطويل إلى أجزاء متعددة (كل جزء حتى 100,000 حرف)"""
-              if len(transcript) <= max_chars:
-                  return [transcript]
+          # ========== دوال Gemini (بدون تقسيم، نص كامل) ==========
+          def send_to_gemini(text, max_retries=5):
+              """إرسال النص الكامل إلى Gemini مع إعادة المحاولة"""
+              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+              headers = {"Content-Type": "application/json"}
               
-              parts = []
-              lines = transcript.split('\n')
-              current_part = []
-              current_length = 0
-              
-              for line in lines:
-                  line_length = len(line) + 1
-                  if current_length + line_length > max_chars and current_part:
-                      parts.append('\n'.join(current_part))
-                      current_part = [line]
-                      current_length = line_length
-                  else:
-                      current_part.append(line)
-                      current_length += line_length
-              
-              if current_part:
-                  parts.append('\n'.join(current_part))
-              
-              print(f"📊 Transcript split into {len(parts)} parts (max {max_chars} chars per part)")
-              return parts
+              user_prompt = f"""الوثيقة هي نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية.
 
-          def extract_clips_from_part(part_text, part_index, total_parts):
-              user_prompt = f"""الوثيقة هي جزء {part_index + 1} من {total_parts} من نص تفريغ فيديو عربي لجلسة أسئلة وأجوبة دينية.
-
-          استخرج جميع الأسئلة والإجابات في هذا الجزء فقط بهذا التنسيق:
+          استخرج جميع الأسئلة والإجابات في هذا النص كاملاً بهذا التنسيق:
           • START_TIME | END_TIME | عنوان السؤال (حد أقصى 10 كلمات)
 
           استخدم تنسيق MM:SS للأوقات.
-          إذا كان السؤال غير مكتمل في هذا الجزء، لا تستخرجه.
           ابدأ الإخراج مباشرة بدون أي مقدمة.
+          تأكد من استخراج كل الأسئلة الموجودة في النص.
 
           النص:
-          {part_text}"""
+          {text}"""
               
-              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-              headers = {"Content-Type": "application/json"}
               payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
               
-              for attempt in range(3):
+              for attempt in range(max_retries):
                   try:
-                      print(f"  📡 Processing part {part_index + 1}/{total_parts} (attempt {attempt + 1})...")
-                      response = requests.post(api_url, headers=headers, json=payload, timeout=300)  # زيادة المهلة إلى 5 دقائق
+                      print(f"📡 Sending to Gemini (attempt {attempt + 1}/{max_retries})...")
+                      print(f"⏱️ Waiting up to 5 minutes for response...")
+                      response = requests.post(api_url, headers=headers, json=payload, timeout=300)  # 5 دقائق مهلة
                       
                       if response.status_code == 200:
                           res_json = response.json()
                           result = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                          print(f"✅ Gemini response received successfully")
                           return result
                       else:
-                          print(f"  ⚠️ Error {response.status_code}, retrying...")
-                          time.sleep(5)
+                          print(f"⚠️ Gemini error {response.status_code}, retrying in 10 seconds...")
+                          time.sleep(10)
+                  except requests.exceptions.Timeout:
+                      print(f"⚠️ Timeout on attempt {attempt + 1}, retrying in 15 seconds...")
+                      time.sleep(15)
                   except Exception as e:
-                      print(f"  ⚠️ Error: {e}, retrying...")
-                      time.sleep(5)
+                      print(f"⚠️ Error: {e}, retrying in 10 seconds...")
+                      time.sleep(10)
               
-              return ""
-
-          def merge_clips_results(results):
-              all_clips = []
-              seen_times = set()
-              
-              for result in results:
-                  for line in result.strip().split('\n'):
-                      if '|' in line:
-                          line = line.lstrip('• ').strip()
-                          parts = line.split('|')
-                          if len(parts) >= 3:
-                              start_time = parts[0].strip()
-                              end_time = parts[1].strip()
-                              title = parts[2].strip()
-                              
-                              if start_time not in seen_times:
-                                  seen_times.add(start_time)
-                                  all_clips.append({
-                                      'start': start_time,
-                                      'end': end_time,
-                                      'title': title
-                                  })
-              
-              def time_to_seconds_sort(t):
-                  parts = t.split(':')
-                  if len(parts) == 2:
-                      return int(parts[0]) * 60 + int(parts[1])
-                  elif len(parts) == 3:
-                      return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-                  return 0
-              
-              all_clips.sort(key=lambda x: time_to_seconds_sort(x['start']))
-              return all_clips
+              print("❌ Gemini failed after all retries")
+              return None
 
           # ========== المعالجة الرئيسية ==========
           def process_video(youtube_url):
@@ -768,43 +717,51 @@ jobs:
                   print("❌ Transcript not found!")
                   return False
               
-              # 4. Gemini AI - معالجة النص الطويل بتقسيمه
+              # 4. Gemini AI - إرسال النص كاملاً بدون تقسيم
               if not GEMINI_KEY:
                   print("❌ GEMINI_API_KEY missing!")
                   return False
               
-              print("🤖 Sending transcript to Gemini (this may take a few minutes)...")
+              print("🤖 Sending full transcript to Gemini (this may take up to 5 minutes)...")
               
               with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
                   transcript_data = f.read()
               
               print(f"📄 Transcript length: {len(transcript_data)} characters")
+              print(f"⏱️ Processing may take a few minutes. Please wait...")
               
-              # تقسيم النص الطويل إلى أجزاء (كل جزء حتى 100,000 حرف)
-              transcript_parts = split_transcript(transcript_data, max_chars=100000)
+              gemini_result = send_to_gemini(transcript_data, max_retries=5)
               
-              # معالجة كل جزء على حدة
-              part_results = []
-              for idx, part in enumerate(transcript_parts):
-                  result = extract_clips_from_part(part, idx, len(transcript_parts))
-                  if result:
-                      part_results.append(result)
-                  time.sleep(2)
-              
-              if not part_results:
-                  print("❌ Gemini failed to extract any clips")
+              if not gemini_result:
+                  print("❌ Gemini failed after 5 retries")
                   return False
               
-              # دمج النتائج
-              clips = merge_clips_results(part_results)
+              print("✨ Gemini analysis complete.")
+              
+              # 5. استخراج المقاطع من النتيجة
+              clips = []
+              for line in gemini_result.strip().split('\n'):
+                  if '|' in line:
+                      line = line.lstrip('• ').strip()
+                      parts = line.split('|')
+                      if len(parts) >= 3:
+                          original_start = parts[0].strip()
+                          original_end = parts[1].strip()
+                          title = parts[2].strip()
+                          clips.append({
+                              'start': original_start,
+                              'end': original_end,
+                              'title': title
+                          })
+                          print(f"  📍 Found clip: {original_start}→{original_end} - {title}")
               
               if not clips:
                   print("⚠️ No clips extracted from transcript")
                   return False
               
-              print(f"✨ Gemini extracted {len(clips)} clips from {len(transcript_parts)} parts")
+              print(f"✨ Gemini extracted {len(clips)} clips from full transcript")
               
-              # 5. تعديل التوقيتات وتصفية المقاطع الطويلة
+              # 6. تعديل التوقيتات وتصفية المقاطع الطويلة
               valid_clips = []
               skipped_count = 0
               
@@ -832,7 +789,7 @@ jobs:
                       'original_start': original_start,
                       'original_end': original_end
                   })
-                  print(f"  📍 Clip: {original_start}→{original_end} => {new_start}→{new_end} ({duration_sec:.0f}s)")
+                  print(f"  📍 Adjusted clip: {original_start}→{original_end} => {new_start}→{new_end} ({duration_sec:.0f}s)")
               
               if skipped_count > 0:
                   print(f"⚠️ Skipped {skipped_count} clip(s) because they exceeded {MAX_CLIP_DURATION}s limit")
@@ -841,7 +798,7 @@ jobs:
                   print("⚠️ No valid clips found after filtering")
                   return False
               
-              # 6. معالجة المقاطع ورفعها مباشرة
+              # 7. معالجة المقاطع ورفعها مباشرة
               print(f"🚀 Starting processing for {len(valid_clips)} clips...")
               
               for idx, clip in enumerate(valid_clips, 1):
