@@ -90,7 +90,6 @@ jobs:
           COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
           SUB_OUTPUT = os.path.join(BASE_DIR, "sub_file")
           EXPECTED_VTT = os.path.join(BASE_DIR, "sub_file.ar.vtt")
-          EXPECTED_VTT_ALT = os.path.join(BASE_DIR, "sub_file.ar.vtt")  # للتبسيط
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
 
           # أوقات النشر (بالتوقيت العالمي UTC)
@@ -521,109 +520,96 @@ jobs:
               print(f"📅 Scheduled: {video_title} at {scheduled['publish_time']}")
               return scheduled
 
-          # ========== المعالجة الرئيسية ==========
+          # ========== المعالجة الرئيسية (بنفس الطريقة القديمة الناجحة) ==========
           def process_video(youtube_url):
               print(f"\n{'='*60}\nProcessing: {youtube_url}\n{'='*60}")
               
-              # 1. تحميل الفيديو
-              print("📥 Downloading video...")
-              with open(COOKIES_FILE, "w") as f:
+              # 1. إنشاء ملف الكوكيز
+              with open(COOKIES_FILE, "w", encoding="utf-8") as f:
                   f.write(COOKIES_TEXT)
               
-              cmd = [
-                  "yt-dlp", "--cookies", COOKIES_FILE,
-                  "--js-runtime", "node",
-                  "--remote-components", "ejs:github",
-                  "-f", "bestvideo+bestaudio/best",
-                  "--merge-output-format", "mp4",
-                  "-o", TEMP_VIDEO, youtube_url
+              # 2. تحميل الفيديو (نفس الطريقة القديمة)
+              print("📥 Downloading video...")
+              command = [
+                  "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
+                  "--remote-components", "ejs:github", "-f", "bestvideo+bestaudio/best",
+                  "--merge-output-format", "mp4", "-o", TEMP_VIDEO, youtube_url
               ]
               
-              result = subprocess.run(cmd, capture_output=True, text=True)
-              
+              result = subprocess.run(command, capture_output=True, text=True)
               if result.returncode != 0 or not os.path.exists(TEMP_VIDEO):
-                  print(f"❌ Download failed")
+                  print("❌ Download failed!")
                   if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
                   return False
               
-              os.remove(COOKIES_FILE)
               video_duration = get_duration(TEMP_VIDEO)
               print(f"📹 Video duration: {seconds_to_time(video_duration)}")
               
-              # 2. استخراج الترجمة - استخدام write-sub بدلاً من write-auto-sub
+              # 3. استخراج الترجمة (نفس الطريقة القديمة - لا نحذف الكوكيز قبل الترجمة)
               print("📜 Extracting transcript...")
-              
-              # تجربة write-sub أولاً (للبث المباشر)
-              srt_cmd = [
-                  "yt-dlp", "--cookies", COOKIES_FILE,
-                  "--js-runtime", "node",
-                  "--remote-components", "ejs:github",
-                  "--skip-download",
-                  "--write-sub", "--sub-lang", "ar",
-                  "--sub-format", "vtt",
-                  "--output", SUB_OUTPUT, youtube_url
+              srt_command = [
+                  "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
+                  "--remote-components", "ejs:github", "--skip-download",
+                  "--write-auto-sub", "--sub-lang", "ar", "--output", SUB_OUTPUT, youtube_url
               ]
-              subprocess.run(srt_cmd, capture_output=True, text=True)
               
-              # إذا لم توجد ترجمة، جرب auto-sub
-              if not os.path.exists(EXPECTED_VTT):
-                  srt_cmd = [
-                      "yt-dlp", "--cookies", COOKIES_FILE,
-                      "--js-runtime", "node",
-                      "--remote-components", "ejs:github",
-                      "--skip-download",
-                      "--write-auto-sub", "--sub-lang", "ar",
-                      "--sub-format", "vtt",
-                      "--output", SUB_OUTPUT, youtube_url
-                  ]
-                  subprocess.run(srt_cmd, capture_output=True, text=True)
+              transcript_exists = False
+              try:
+                  subprocess.run(srt_command, capture_output=True, text=True)
+                  if os.path.exists(EXPECTED_VTT):
+                      with open(EXPECTED_VTT, "r", encoding="utf-8") as vtt_f:
+                          vtt_content = vtt_f.read()
+                      
+                      lines = []
+                      for line in vtt_content.split('\n'):
+                          line = line.strip()
+                          if line and not line.startswith('WEBVTT') and not line.startswith('Kind:') and not line.startswith('Language:') and '-->' not in line:
+                              if not lines or lines[-1] != line:
+                                  lines.append(line)
+                      
+                      with open(FINAL_TRANSCRIPT, "w", encoding="utf-8") as f:
+                          f.write('\n'.join(lines))
+                      transcript_exists = True
+              except Exception as e:
+                  print(f"❌ VTT Extraction failed: {e}")
               
-              if not os.path.exists(EXPECTED_VTT):
-                  print("❌ No Arabic subtitles found for this video (tried both sub and auto-sub)")
+              # حذف الكوكيز بعد الانتهاء من استخراج الترجمة
+              if os.path.exists(COOKIES_FILE):
+                  os.remove(COOKIES_FILE)
+              
+              if not transcript_exists:
+                  print("❌ Transcript not found!")
                   return False
               
-              # قراءة ملف الترجمة
-              with open(EXPECTED_VTT, "r", encoding="utf-8") as vtt_f:
-                  vtt_content = vtt_f.read()
+              # 4. Gemini AI (نفس الطريقة القديمة)
+              if not GEMINI_KEY:
+                  print("❌ GEMINI_API_KEY missing!")
+                  return False
               
-              lines = []
-              for line in vtt_content.split('\n'):
-                  line = line.strip()
-                  if line and not line.startswith('WEBVTT') and not line.startswith('Kind:') and not line.startswith('Language:') and '-->' not in line:
-                      if not lines or lines[-1] != line:
-                          lines.append(line)
-              
-              with open(FINAL_TRANSCRIPT, "w", encoding="utf-8") as f:
-                  f.write('\n'.join(lines))
-              
-              print(f"✅ Transcript extracted: {len(lines)} lines")
-              
-              # 3. Gemini AI
               print("🤖 Sending transcript to Gemini...")
-              with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
-                  transcript_data = f.read()
-              
-              # إذا كان النص طويلاً جداً، خذ أول 30000 حرف فقط
-              if len(transcript_data) > 30000:
-                  transcript_data = transcript_data[:30000]
-                  print("⚠️ Transcript truncated to 30000 characters")
-              
-              user_prompt = get_gemini_prompt(transcript_data)
-              api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-              headers = {"Content-Type": "application/json"}
-              payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
-              
-              response = requests.post(api_url, headers=headers, json=payload, timeout=120)
-              
-              if response.status_code != 200:
-                  print(f"❌ Gemini API Error: {response.status_code}")
+              try:
+                  with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
+                      transcript_data = f.read()
+                  
+                  user_prompt = get_gemini_prompt(transcript_data)
+                  api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+                  headers = {"Content-Type": "application/json"}
+                  payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
+                  
+                  response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+                  
+                  if response.status_code != 200:
+                      print(f"❌ Gemini API Error: {response.status_code}")
+                      return False
+                  
+                  res_json = response.json()
+                  gemini_result = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                  print("✨ Gemini analysis complete.")
+              except Exception as e:
+                  print(f"❌ Gemini processing failed: {e}")
                   return False
               
-              res_json = response.json()
-              gemini_result = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
-              print("✨ Gemini analysis complete.")
-              
-              # 4. استخراج المقاطع
+              # 5. استخراج المقاطع
               clips = []
               for line in gemini_result.strip().split('\n'):
                   if '|' in line:
@@ -641,7 +627,7 @@ jobs:
                   print("⚠️ No valid clips found")
                   return False
               
-              # 5. معالجة المقاطع
+              # 6. معالجة المقاطع
               print(f"🚀 Starting processing for {len(clips)} clips...")
               for idx, clip in enumerate(clips, 1):
                   print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']}")
@@ -694,40 +680,26 @@ jobs:
               print("❌ GEMINI_API_KEY not found!")
               sys.exit(1)
           
-          # معالجة الروابط حتى نجد رابطاً صالحاً
-          max_attempts = 10
-          attempts = 0
-          success = False
+          # الحصول على أول رابط
+          first_url, remaining_urls, file_sha = get_first_url()
           
-          while attempts < max_attempts and not success:
-              first_url, remaining_urls, file_sha = get_first_url()
-              
-              if not first_url:
-                  print("✅ No videos to process")
-                  sys.exit(0)
-              
-              print(f"\n🚀 Processing: {first_url}")
-              
-              # محاولة معالجة الفيديو
-              success = process_video(first_url)
-              
-              if success:
-                  if update_videos_file(remaining_urls, file_sha):
-                      print(f"\n✅ Video processed successfully and removed from list!")
-                  else:
-                      print(f"\n⚠️ Video processed but failed to update list")
+          if not first_url:
+              print("✅ No videos to process")
+              sys.exit(0)
+          
+          # معالجة الفيديو
+          print(f"\n🚀 Processing: {first_url}")
+          success = process_video(first_url)
+          
+          # حذف الرابط فقط إذا نجحت المعالجة بالكامل
+          if success:
+              if update_videos_file(remaining_urls, file_sha):
+                  print(f"\n✅ Video processed successfully and removed from list!")
               else:
-                  print(f"\n❌ Video failed. Removing from list and trying next...")
-                  if update_videos_file(remaining_urls, file_sha):
-                      print(f"🗑️ Removed failed URL from list")
-                  else:
-                      print(f"⚠️ Failed to remove URL, stopping")
-                      sys.exit(1)
-              
-              attempts += 1
-          
-          if not success:
-              print(f"\n⚠️ Tried {max_attempts} videos, none were successful. Stopping for today.")
+                  print(f"\n⚠️ Video processed but failed to update list")
+          else:
+              print(f"\n❌ Video processing failed. URL remains in videos.txt")
+              sys.exit(1)
           
           # عرض حالة الجدولة
           schedule = load_schedule()
