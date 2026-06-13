@@ -2,8 +2,8 @@ name: YouTube Ultimate QA Extractor - Daily Schedule
 
 on:
   schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    - cron: '0 0 */3 * *'
+  crow_dispatch:
     inputs:
       telegram_target:
         description: 'Telegram Channel/User ID'
