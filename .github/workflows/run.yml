@@ -90,6 +90,7 @@ jobs:
           COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
           SUB_OUTPUT = os.path.join(BASE_DIR, "sub_file")
           EXPECTED_VTT = os.path.join(BASE_DIR, "sub_file.ar.vtt")
+          EXPECTED_VTT_ALT = os.path.join(BASE_DIR, "sub_file.ar.vtt")  # للتبسيط
           FINAL_TRANSCRIPT = os.path.join(BASE_DIR, "transcript.txt")
 
           # أوقات النشر (بالتوقيت العالمي UTC)
@@ -178,61 +179,6 @@ jobs:
               except Exception as e:
                   print(f"❌ Error: {e}")
                   return False
-
-          # ========== التحقق من وجود ترجمة (بدون تحميل الفيديو) ==========
-          def check_subtitles_only(youtube_url):
-              """التحقق من وجود ترجمة عربية بدون تحميل الفيديو"""
-              print("🔍 Checking for Arabic subtitles...")
-              
-              with open(COOKIES_FILE, "w") as f:
-                  f.write(COOKIES_TEXT)
-              
-              # استخدام yt-dlp لفحص الترجمة فقط
-              cmd = [
-                  "yt-dlp", "--cookies", COOKIES_FILE,
-                  "--list-subs", "--skip-download",
-                  youtube_url
-              ]
-              
-              try:
-                  result = subprocess.run(cmd, capture_output=True, text=True)
-                  output = result.stdout + result.stderr
-                  
-                  # البحث عن وجود ترجمة عربية
-                  has_arabic = False
-                  for line in output.split('\n'):
-                      if 'ar' in line.lower() or 'arabic' in line.lower():
-                          has_arabic = True
-                          break
-                  
-                  # التحقق أيضاً من وجود ملف الترجمة التلقائية
-                  test_cmd = [
-                      "yt-dlp", "--cookies", COOKIES_FILE,
-                      "--write-auto-sub", "--sub-lang", "ar",
-                      "--skip-download", "--sub-format", "vtt",
-                      "-o", SUB_OUTPUT, youtube_url
-                  ]
-                  subprocess.run(test_cmd, capture_output=True, text=True)
-                  
-                  if os.path.exists(EXPECTED_VTT):
-                      has_arabic = True
-                      # تنظيف الملف المؤقت
-                      if os.path.exists(EXPECTED_VTT):
-                          os.remove(EXPECTED_VTT)
-                  
-                  if has_arabic:
-                      print("✅ Arabic subtitles found!")
-                  else:
-                      print("❌ No Arabic subtitles found for this video")
-                  
-                  return has_arabic
-                  
-              except Exception as e:
-                  print(f"❌ Error checking subtitles: {e}")
-                  return False
-              finally:
-                  if os.path.exists(COOKIES_FILE):
-                      os.remove(COOKIES_FILE)
 
           # ========== دوال التحميل الأساسية ==========
           def download_file(url, dest):
@@ -477,52 +423,17 @@ jobs:
           1. ابحث عن الكلمات المفتاحية: 'سؤال'، 'يسأل'، 'أريد أن أسأل'، 'ما حكم'، 'هل يجوز'، 'ما رأيك'
           2. ابحث عن صيغ الاستفهام: 'هل'، 'متى'، 'كيف'، 'لماذا'، 'أين'
           3. ابحث عن انتقال المتحدث من الحديث العام إلى سؤال محدد
-          4. ابدأ من أول كلمة للسؤال، وليس من رد المحاضر
 
           **معايير تحديد نهاية الإجابة (END_TIME):**
           1. تنتهي الإجابة عندما ينتقل المتحدث إلى سؤال جديد أو موضوع مختلف تماماً
           2. تنتهي عندما يقول المتحدث كلمات مثل: 'هذا والله أعلم'، 'انتهى'، 'ننتقل للسؤال التالي'
-          3. تنتهي عندما يبدأ السائل بسؤال جديد أو يعود المتحدث للرد على سائل آخر
-          4. لا تقطع الإجابة في منتصفها - تأكد من تغطية كامل الرد على السؤال
-          5. إذا كانت الإجابة طويلة ومتشعبة، حاول إيجاد نقطة النهاية الطبيعية للرد على السؤال الأصلي
-
-          **قواعد دقيقة للمقاطع:**
-          1. كل مقطع = سؤال واحد + إجابته الكاملة
-          2. إذا تحدث المحاضر عن مسألة فرعية ضمن الإجابة، اعتبرها جزءاً من نفس المقطع
-          3. إذا عاد المحاضر لنفس السؤال لاحقاً، اعتبره مقطعاً جديداً مستقلاً
-          4. المقطع يجب أن يكون متكاملاً ومفهوماً لوحده
-          5. لا تخلط بين الأسئلة المختلفة في مقطع واحد
 
           **تنسيق الإخراج الإلزامي:**
-          يجب أن يكون الإخراج بالضبط كالتالي:
-          • [START_TIME] | [END_TIME] | [العنوان]
-          • [START_TIME] | [END_TIME] | [العنوان]
           • [START_TIME] | [END_TIME] | [العنوان]
 
           **قواعد الأوقات:**
-          1. START_TIME: وقت بداية السؤال (أول كلمة للسؤال)
-          2. END_TIME: وقت نهاية الإجابة (آخر كلمة للرد)
-          3. للأوقات أقل من ساعة: استخدم تنسيق MM:SS فقط (مثل 03:44، 15:30)
-          4. للأوقات أكثر من ساعة: استخدم تنسيق HH:MM:SS (مثل 01:05:30، 02:15:45)
-
-          **قواعد كتابة العناوين:**
-          1. العنوان يجب أن يكون سؤالاً مختصراً يعبر عن جوهر المسألة
-          2. استخدم صيغة السؤال: 'حكم كذا؟'، 'هل يجوز كذا؟'، 'ما شرح كذا؟'
-          3. لا تتجاوز 10 كلمات
-          4. اجعل العنوان واضحاً وسهل الفهم للمشاهد العادي
-
-          **أمثلة على التنسيق المطلوب:**
-          • 03:44 | 08:30 | حكم الصلاة في الثياب المتسخة
-          • 15:20 | 22:45 | هل يجوز صلاة الجمعة بدون خطبة
-          • 01:05:30 | 01:12:15 | شرح حديث الجارية
-          • 02:30:15 | 02:38:20 | الفرق بين الزكاة والصدقة
-
-          **تنبيهات مهمة:**
-          1. لا تخرج أي شيء غير التنسيق المطلوب
-          2. لا تكرر نفس السؤال في مقاطع متعددة
-          3. إذا لم تجد سؤالاً واضحاً، لا تخرج شيئاً
-          4. تأكد من أن END_TIME بعد START_TIME
-          5. افحص النص جيداً لاستخراج كل الأسئلة دون استثناء
+          - استخدم تنسيق MM:SS للأوقات أقل من ساعة
+          - استخدم تنسيق HH:MM:SS للأوقات أكثر من ساعة
 
           ابدأ الإخراج مباشرة دون أي مقدمة أو شرح.
 
@@ -614,12 +525,7 @@ jobs:
           def process_video(youtube_url):
               print(f"\n{'='*60}\nProcessing: {youtube_url}\n{'='*60}")
               
-              # 1. التحقق من وجود ترجمة أولاً (بدون تحميل الفيديو)
-              if not check_subtitles_only(youtube_url):
-                  print("❌ Video skipped: No Arabic subtitles available")
-                  return False
-              
-              # 2. تحميل الفيديو
+              # 1. تحميل الفيديو
               print("📥 Downloading video...")
               with open(COOKIES_FILE, "w") as f:
                   f.write(COOKIES_TEXT)
@@ -644,22 +550,39 @@ jobs:
               video_duration = get_duration(TEMP_VIDEO)
               print(f"📹 Video duration: {seconds_to_time(video_duration)}")
               
-              # 3. استخراج الترجمة
+              # 2. استخراج الترجمة - استخدام write-sub بدلاً من write-auto-sub
               print("📜 Extracting transcript...")
+              
+              # تجربة write-sub أولاً (للبث المباشر)
               srt_cmd = [
                   "yt-dlp", "--cookies", COOKIES_FILE,
                   "--js-runtime", "node",
                   "--remote-components", "ejs:github",
                   "--skip-download",
-                  "--write-auto-sub", "--sub-lang", "ar",
+                  "--write-sub", "--sub-lang", "ar",
+                  "--sub-format", "vtt",
                   "--output", SUB_OUTPUT, youtube_url
               ]
               subprocess.run(srt_cmd, capture_output=True, text=True)
               
+              # إذا لم توجد ترجمة، جرب auto-sub
               if not os.path.exists(EXPECTED_VTT):
-                  print("❌ No Arabic subtitles found for this video")
+                  srt_cmd = [
+                      "yt-dlp", "--cookies", COOKIES_FILE,
+                      "--js-runtime", "node",
+                      "--remote-components", "ejs:github",
+                      "--skip-download",
+                      "--write-auto-sub", "--sub-lang", "ar",
+                      "--sub-format", "vtt",
+                      "--output", SUB_OUTPUT, youtube_url
+                  ]
+                  subprocess.run(srt_cmd, capture_output=True, text=True)
+              
+              if not os.path.exists(EXPECTED_VTT):
+                  print("❌ No Arabic subtitles found for this video (tried both sub and auto-sub)")
                   return False
               
+              # قراءة ملف الترجمة
               with open(EXPECTED_VTT, "r", encoding="utf-8") as vtt_f:
                   vtt_content = vtt_f.read()
               
@@ -673,17 +596,24 @@ jobs:
               with open(FINAL_TRANSCRIPT, "w", encoding="utf-8") as f:
                   f.write('\n'.join(lines))
               
-              # 4. Gemini AI
+              print(f"✅ Transcript extracted: {len(lines)} lines")
+              
+              # 3. Gemini AI
               print("🤖 Sending transcript to Gemini...")
               with open(FINAL_TRANSCRIPT, "r", encoding="utf-8") as f:
                   transcript_data = f.read()
+              
+              # إذا كان النص طويلاً جداً، خذ أول 30000 حرف فقط
+              if len(transcript_data) > 30000:
+                  transcript_data = transcript_data[:30000]
+                  print("⚠️ Transcript truncated to 30000 characters")
               
               user_prompt = get_gemini_prompt(transcript_data)
               api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
               headers = {"Content-Type": "application/json"}
               payload = {"contents": [{"parts": [{"text": user_prompt}]}]}
               
-              response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+              response = requests.post(api_url, headers=headers, json=payload, timeout=120)
               
               if response.status_code != 200:
                   print(f"❌ Gemini API Error: {response.status_code}")
@@ -693,7 +623,7 @@ jobs:
               gemini_result = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
               print("✨ Gemini analysis complete.")
               
-              # 5. استخراج المقاطع
+              # 4. استخراج المقاطع
               clips = []
               for line in gemini_result.strip().split('\n'):
                   if '|' in line:
@@ -711,7 +641,7 @@ jobs:
                   print("⚠️ No valid clips found")
                   return False
               
-              # 6. معالجة المقاطع
+              # 5. معالجة المقاطع
               print(f"🚀 Starting processing for {len(clips)} clips...")
               for idx, clip in enumerate(clips, 1):
                   print(f"\n🎬 Processing Clip {idx}/{len(clips)}: {clip['title']}")
@@ -764,13 +694,12 @@ jobs:
               print("❌ GEMINI_API_KEY not found!")
               sys.exit(1)
           
-          # معالجة الروابط حتى نجد رابطاً صالحاً (يحتوي على ترجمة)
-          max_attempts = 10  # لمنع الحلقات اللانهائية
+          # معالجة الروابط حتى نجد رابطاً صالحاً
+          max_attempts = 10
           attempts = 0
           success = False
           
           while attempts < max_attempts and not success:
-              # الحصول على أول رابط
               first_url, remaining_urls, file_sha = get_first_url()
               
               if not first_url:
@@ -783,18 +712,16 @@ jobs:
               success = process_video(first_url)
               
               if success:
-                  # حذف الرابط إذا نجحت المعالجة
                   if update_videos_file(remaining_urls, file_sha):
                       print(f"\n✅ Video processed successfully and removed from list!")
                   else:
                       print(f"\n⚠️ Video processed but failed to update list")
               else:
-                  # الفيديو فشل (غالباً لعدم وجود ترجمة) -> احذفه وتابع للرابط التالي
-                  print(f"\n❌ Video failed (no subtitles or error). Removing from list and trying next...")
+                  print(f"\n❌ Video failed. Removing from list and trying next...")
                   if update_videos_file(remaining_urls, file_sha):
                       print(f"🗑️ Removed failed URL from list")
                   else:
-                      print(f"⚠️ Failed to remove URL, stopping to avoid infinite loop")
+                      print(f"⚠️ Failed to remove URL, stopping")
                       sys.exit(1)
               
               attempts += 1
