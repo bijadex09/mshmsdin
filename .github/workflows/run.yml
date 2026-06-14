@@ -328,13 +328,30 @@ jobs:
               if minutes >= 60: hours = minutes // 60; minutes = minutes % 60; return f"{hours:02d}:{minutes:02d}:{secs:02d}"
               return f"{minutes:02d}:{secs:02d}"
 
+          # ========== دالة تحويل الوقت المعدلة ==========
           def time_to_seconds(time_str: str) -> float:
+              """تحويل تنسيق الوقت إلى ثواني (يدعم MM:SS, MM:SS.mmm, HH:MM:SS, HH:MM:SS.mmm)"""
               time_str = time_str.strip()
-              if '.' in time_str: time_str = time_str.split('.')[0]
-              parts = time_str.split(':')
-              if len(parts) == 2: return int(parts[0]) * 60 + int(parts[1])
-              elif len(parts) == 3: return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-              return 0.0
+              
+              # فصل الأجزاء العشرية إذا وجدت
+              if '.' in time_str:
+                  main_part, _ = time_str.split('.')
+              else:
+                  main_part = time_str
+              
+              parts = main_part.split(':')
+              if len(parts) == 2:  # MM:SS
+                  minutes = int(parts[0])
+                  seconds = int(parts[1])
+                  return minutes * 60 + seconds
+              elif len(parts) == 3:  # HH:MM:SS
+                  hours = int(parts[0])
+                  minutes = int(parts[1])
+                  seconds = int(parts[2])
+                  return hours * 3600 + minutes * 60 + seconds
+              else:
+                  print(f"⚠️ Warning: Unknown time format: {time_str}")
+                  return 0.0
 
           def adjust_timestamp(start_time: str, end_time: str, video_duration: float) -> Tuple[str, str]:
               start_sec = max(0, time_to_seconds(start_time) + START_OFFSET)
@@ -613,7 +630,7 @@ jobs:
                   print(f"❌ YouTube error: {e}")
               return None
 
-          # ========== دوال Gemini (بدون تقسيم، نص كامل) ==========
+          # ========== دوال Gemini ==========
           def send_to_gemini(text, max_retries=5):
               """إرسال النص الكامل إلى Gemini مع إعادة المحاولة"""
               api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
@@ -637,7 +654,7 @@ jobs:
                   try:
                       print(f"📡 Sending to Gemini (attempt {attempt + 1}/{max_retries})...")
                       print(f"⏱️ Waiting up to 5 minutes for response...")
-                      response = requests.post(api_url, headers=headers, json=payload, timeout=300)  # 5 دقائق مهلة
+                      response = requests.post(api_url, headers=headers, json=payload, timeout=300)
                       
                       if response.status_code == 200:
                           res_json = response.json()
@@ -717,7 +734,7 @@ jobs:
                   print("❌ Transcript not found!")
                   return False
               
-              # 4. Gemini AI - إرسال النص كاملاً بدون تقسيم
+              # 4. Gemini AI
               if not GEMINI_KEY:
                   print("❌ GEMINI_API_KEY missing!")
                   return False
@@ -738,8 +755,9 @@ jobs:
               
               print("✨ Gemini analysis complete.")
               
-              # 5. استخراج المقاطع من النتيجة
+              # 5. استخراج المقاطع من النتيجة مع التحقق من الصحة
               clips = []
+              invalid_count = 0
               for line in gemini_result.strip().split('\n'):
                   if '|' in line:
                       line = line.lstrip('• ').strip()
@@ -748,20 +766,51 @@ jobs:
                           original_start = parts[0].strip()
                           original_end = parts[1].strip()
                           title = parts[2].strip()
+                          
+                          # تحويل إلى ثواني للتحقق
+                          start_sec = time_to_seconds(original_start)
+                          end_sec = time_to_seconds(original_end)
+                          
+                          # التحقق من صحة التوقيتات
+                          if start_sec == 0 and end_sec == 0:
+                              print(f"  ⚠️ Skipping invalid time format: {original_start}→{original_end}")
+                              invalid_count += 1
+                              continue
+                          
+                          if end_sec <= start_sec:
+                              print(f"  ⚠️ Skipping clip where end <= start: {original_start}→{original_end}")
+                              invalid_count += 1
+                              continue
+                          
+                          # التحقق من أن المدة معقولة (أكثر من 5 ثوانٍ وأقل من 10 دقائق)
+                          duration = end_sec - start_sec
+                          if duration < 5:
+                              print(f"  ⚠️ Skipping too short clip ({duration:.0f}s): {original_start}→{original_end}")
+                              invalid_count += 1
+                              continue
+                          
+                          if duration > 600:  # 10 دقائق كحد أقصى
+                              print(f"  ⚠️ Skipping too long clip ({duration:.0f}s): {original_start}→{original_end}")
+                              invalid_count += 1
+                              continue
+                          
                           clips.append({
                               'start': original_start,
                               'end': original_end,
                               'title': title
                           })
-                          print(f"  📍 Found clip: {original_start}→{original_end} - {title}")
+                          print(f"  📍 Found valid clip: {original_start}→{original_end} ({duration:.0f}s) - {title}")
+              
+              if invalid_count > 0:
+                  print(f"⚠️ Skipped {invalid_count} invalid clips")
               
               if not clips:
-                  print("⚠️ No clips extracted from transcript")
+                  print("⚠️ No valid clips extracted from transcript")
                   return False
               
-              print(f"✨ Gemini extracted {len(clips)} clips from full transcript")
+              print(f"✨ Gemini extracted {len(clips)} valid clips from full transcript")
               
-              # 6. تعديل التوقيتات وتصفية المقاطع الطويلة
+              # 6. تعديل التوقيتات وتصفية المقاطع حسب الحد الأقصى للمدة
               valid_clips = []
               skipped_count = 0
               
