@@ -333,6 +333,9 @@ jobs:
               """تحويل تنسيق الوقت إلى ثواني (يدعم MM:SS, MM:SS.mmm, HH:MM:SS, HH:MM:SS.mmm)"""
               time_str = time_str.strip()
               
+              # إزالة الأحرف غير الرقمية من البداية (مثل * أو • أو -)
+              time_str = re.sub(r'^[^\d]+', '', time_str)
+              
               # فصل الأجزاء العشرية إذا وجدت
               if '.' in time_str:
                   main_part, _ = time_str.split('.')
@@ -760,12 +763,17 @@ jobs:
               invalid_count = 0
               for line in gemini_result.strip().split('\n'):
                   if '|' in line:
-                      line = line.lstrip('• ').strip()
+                      # إزالة علامة النجمة من بداية السطر إذا وجدت
+                      line = line.lstrip('•* ').strip()
                       parts = line.split('|')
                       if len(parts) >= 3:
                           original_start = parts[0].strip()
                           original_end = parts[1].strip()
                           title = parts[2].strip()
+                          
+                          # تنظيف التوقيتات من الأحرف غير المرغوب فيها
+                          original_start = re.sub(r'^[^\d]+', '', original_start)
+                          original_end = re.sub(r'^[^\d]+', '', original_end)
                           
                           # تحويل إلى ثواني للتحقق
                           start_sec = time_to_seconds(original_start)
@@ -782,15 +790,10 @@ jobs:
                               invalid_count += 1
                               continue
                           
-                          # التحقق من أن المدة معقولة (أكثر من 5 ثوانٍ وأقل من 10 دقائق)
+                          # التحقق من أن المدة معقولة (أكثر من 5 ثوانٍ)
                           duration = end_sec - start_sec
                           if duration < 5:
                               print(f"  ⚠️ Skipping too short clip ({duration:.0f}s): {original_start}→{original_end}")
-                              invalid_count += 1
-                              continue
-                          
-                          if duration > 600:  # 10 دقائق كحد أقصى
-                              print(f"  ⚠️ Skipping too long clip ({duration:.0f}s): {original_start}→{original_end}")
                               invalid_count += 1
                               continue
                           
